@@ -1,4 +1,4 @@
-// 归档同步助手 – popup。状态写入 chrome.storage.session，
+// 跨标签页操作同步助手 – popup。状态写入 chrome.storage.session，
 // Service Worker 据此注入脚本、连接调试器、更新角标。
 
 const DEFAULT_STATE = {
@@ -47,7 +47,7 @@ async function accessProblem(tab) {
   const url = tab.url || tab.pendingUrl || '';
   if (url.startsWith('file:')) {
     return (await chrome.extension.isAllowedFileSchemeAccess()) ? null
-      : '未开启本地文件访问：地址栏输入扩展管理页 → 归档同步助手 → 详情 → 打开"允许访问文件网址"（或使用 http:// 内网地址）。';
+      : '未开启本地文件访问：地址栏输入扩展管理页 → 跨标签页操作同步助手 → 详情 → 打开"允许访问文件网址"（或使用 http:// 内网地址）。';
   }
   let origin;
   try { origin = new URL(url).origin; } catch { return null; }

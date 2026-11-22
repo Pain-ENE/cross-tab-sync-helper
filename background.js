@@ -1,4 +1,4 @@
-// 归档同步助手（基于开源项目 aysner/Multi-Tab-Sync 修改）– Service Worker。
+// 跨标签页操作同步助手（基于开源项目 aysner/Multi-Tab-Sync 修改）– Service Worker。
 // 管理同步组、注入内容脚本、在标签页之间路由事件，
 // 并管理"字段隔离"名单与点选模式。
 
@@ -161,7 +161,7 @@ function systemNotify(on, count) {
     chrome.notifications.create({
       type: 'basic',
       iconUrl: chrome.runtime.getURL('icons/icon128.png'),
-      title: on ? '归档同步助手：同步已开启' : '归档同步助手：同步已关闭',
+      title: on ? '跨标签页操作同步助手：同步已开启' : '跨标签页操作同步助手：同步已关闭',
       message: on
         ? (count ? `${count} 个标签页将实时跟随你的操作；各页不同的字段（如编号）保持独立。`
                 : '尚未勾选任何标签页：请点扩展图标，先勾选要同步的页面。')
@@ -182,8 +182,8 @@ function updateBadge(s) {
   chrome.action.setBadgeBackgroundColor({ color: s.opts.precision ? '#c2410c' : '#15803d' });
   chrome.action.setTitle({
     title: s.enabled
-      ? `归档同步助手：同步已开启（${n} 个标签页${s.opts.precision ? '，精确模式' : ''}）`
-      : '归档同步助手：同步已关闭',
+      ? `跨标签页操作同步助手：同步已开启（${n} 个标签页${s.opts.precision ? '，精确模式' : ''}）`
+      : '跨标签页操作同步助手：同步已关闭',
   });
 }
 
@@ -328,7 +328,7 @@ function enqueue(tabId, job) {
   const prev = queues.get(tabId) || Promise.resolve();
   const next = prev
     .then(job)
-    .catch((err) => console.debug('[归档同步助手] 回放失败', tabId, err))
+    .catch((err) => console.debug('[跨标签页操作同步助手] 回放失败', tabId, err))
     .finally(() => {
       inFlight.set(tabId, inFlight.get(tabId) - 1);
       lastReplay.set(tabId, Date.now());
@@ -447,7 +447,7 @@ async function tileTabs(screen) {
         await chrome.windows.create({ tabId, ...bounds });
       }
     } catch (err) {
-      console.debug('[归档同步助手] 平铺单个窗口失败', tabId, err.message);
+      console.debug('[跨标签页操作同步助手] 平铺单个窗口失败', tabId, err.message);
     }
   }
 }

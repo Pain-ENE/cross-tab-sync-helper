@@ -1,4 +1,4 @@
-// 归档同步助手（基于开源项目 aysner/Multi-Tab-Sync 修改）– content script。
+// 跨标签页操作同步助手（基于开源项目 aysner/Multi-Tab-Sync 修改）– content script。
 // 由 Service Worker 注入到同步组各标签页的每个框架。
 // 捕获真实用户事件（isTrusted）并把其他标签页发来的事件在本地回放。
 
@@ -131,7 +131,7 @@
   }
 
   // ---------------------------------------------------------------------------
-  // 字段隔离（不同步的字段名单，如各标签页互不相同的档案编号）
+  // 字段隔离（不同步的字段名单，如各标签页互不相同的编号）
   // ---------------------------------------------------------------------------
   const excluded = new Set(); // key 形如 'name:xxx' / 'id:xxx'
   let fieldLabels = {};      // key -> 显示名
@@ -624,7 +624,7 @@
     switch (msg?.type) {
       case 'mts:replay':
         if (msg.event.frame === FRAME_KEY) {
-          try { REPLAY[msg.event.kind]?.(msg.event); } catch (err) { console.debug('[归档同步助手] 回放失败', err); }
+          try { REPLAY[msg.event.kind]?.(msg.event); } catch (err) { console.debug('[跨标签页操作同步助手] 回放失败', err); }
         }
         return;
       case 'mts:locate':

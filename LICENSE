@@ -1,4 +1,4 @@
-归档同步助手（Archive Sync Helper）
+跨标签页操作同步助手（Cross-Tab Sync Helper）
 版权与授权声明
 
 一、来源声明
@@ -27,8 +27,8 @@
 三、修改再分发要求
   任何人对本项目进行修改后再分发时，须在代码仓库 README 或
   其他显著位置注明：
-    "本项目基于 aysner/Multi-Tab-Sync（上游）与
-     归档同步助手 Archive Sync Helper（本仓库地址）修改"。
+     "本项目基于 aysner/Multi-Tab-Sync（上游）与
+      跨标签页操作同步助手 Cross-Tab Sync Helper（本仓库地址）修改"。
 
 四、完整协议文本
   CC BY-NC 4.0 官方法律文本全文见本文件后半部分，协议要点与
