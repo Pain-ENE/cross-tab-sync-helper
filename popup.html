@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>归档同步助手</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <img src="icons/icon32.png" alt="" width="20" height="20">
+    <h1>归档同步助手</h1>
+    <label class="switch" title="开/关同步（快捷键 Alt+Shift+S）">
+      <input type="checkbox" id="enabled">
+      <span class="slider"></span>
+    </label>
+  </header>
+
+  <section>
+    <div class="section-head">
+      <h2>参与同步的标签页</h2>
+      <span class="hint" id="count"></span>
+    </div>
+    <ul id="tabs"></ul>
+    <button id="tile" type="button">将勾选的标签页分窗口并排排列</button>
+  </section>
+
+  <section>
+    <h2>不同步的字段（各标签页内容不同，如档案编号）</h2>
+    <ul id="excluded"></ul>
+    <button id="addExcluded" type="button">＋ 点击页面选择要隔离的字段</button>
+    <p class="hint">进入点选模式后，到任意一个参与同步的标签页里点击要隔离的字段（如"档案编号"输入框），该字段的输入将只在所在标签页生效、不会互相覆盖。</p>
+  </section>
+
+  <section>
+    <h2>同步内容</h2>
+    <div class="grid">
+      <label><input type="checkbox" data-opt="scroll"> 滚动</label>
+      <label><input type="checkbox" data-opt="click"> 鼠标点击</label>
+      <label><input type="checkbox" data-opt="keys"> 键盘与输入</label>
+      <label><input type="checkbox" data-opt="nav"> 页面跳转</label>
+    </div>
+    <label class="row">
+      滚动位置
+      <select data-opt="scrollMode">
+        <option value="absolute">绝对（像素）</option>
+        <option value="relative">相对（页面百分比）</option>
+      </select>
+    </label>
+  </section>
+
+  <section class="precision">
+    <label class="row">
+      <span>
+        <strong>精确模式</strong>
+        <span class="hint">通过浏览器调试接口派发真实点击与按键，适合普通模式不起作用的页面。开启后浏览器顶部会出现黄色提示条。</span>
+      </span>
+      <span class="switch">
+        <input type="checkbox" data-opt="precision">
+        <span class="slider"></span>
+      </span>
+    </label>
+  </section>
+
+  <footer class="hint">
+    推荐流程：① 勾选标签页 → ② 保持开关关闭，逐个标签页填好各自不同的编号（或用"隔离字段"功能把编号框隔离）→ ③ 点「分窗口并排排列」把各页平铺同屏 → ④ 打开顶部开关，在任意窗口操作，其余同步跟随 → ⑤ 逐窗核对后手动提交（可把"提交"按钮也加入隔离，防止误点连带）。<br>
+    快捷键：Alt+,（逗号）开启同步 · Alt+.（句号）关闭同步（每次切换各页会弹提示条，并伴随系统通知）· Alt+Shift+A 当前标签页加入/移出同步组。密码框永远不会被同步。
+  </footer>
+
+  <template id="tab-row">
+    <li>
+      <label>
+        <input type="checkbox">
+        <img class="favicon" alt="" width="16" height="16">
+        <span class="text">
+          <span class="title"></span>
+          <span class="url"></span>
+          <span class="error"></span>
+        </span>
+        <span class="warn" hidden>⚠</span>
+      </label>
+    </li>
+  </template>
+
+  <template id="excluded-row">
+    <li>
+      <span class="ex-label"></span>
+      <code class="ex-key"></code>
+      <button class="ex-remove" type="button" title="移除该字段">×</button>
+    </li>
+  </template>
+
+  <script src="popup.js"></script>
+</body>
+</html>

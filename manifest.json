@@ -1,0 +1,58 @@
+{
+  "manifest_version": 3,
+  "name": "归档同步助手（多标签页同步）",
+  "version": "1.3.1",
+  "description": "把一个标签页的点击、键盘输入、滚动和页面跳转实时同步到勾选的其他标签页，适合批量归档等重复操作。可把各标签页内容不同的字段（如档案编号）设为不同步，避免互相覆盖。",
+  "author": {
+    "email": "chrome@aysner.at"
+  },
+  "permissions": [
+    "tabs",
+    "scripting",
+    "storage",
+    "debugger",
+    "notifications"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "归档同步助手（多标签页同步）",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "commands": {
+    "sync-on": {
+      "suggested_key": {
+        "default": "Alt+Comma"
+      },
+      "description": "开启同步"
+    },
+    "sync-off": {
+      "suggested_key": {
+        "default": "Alt+Period"
+      },
+      "description": "关闭同步"
+    },
+    "toggle-tab": {
+      "suggested_key": {
+        "default": "Alt+Shift+A"
+      },
+      "description": "把当前标签页加入/移出同步组"
+    }
+  }
+}
