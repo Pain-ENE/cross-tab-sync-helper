@@ -484,8 +484,21 @@
       if (isStaleFieldEvent(el, el.value)) return; // 注入前的旧输入，不广播
       send({ kind: 'input', sel, value: el.value });
     } else if (el instanceof HTMLElement && el.isContentEditable) {
+      // 自绘/受控编辑器（腾讯文档、React 富文本等）：
+      // - IME 组合中间态不广播（isComposing），确认上屏后的 input 再广播，避免重复插入
+      // - 除 html 外附带本次插入的增量文本 ins（e.data）与编辑器坐标——
+      //   目标页直接改 DOM + 合成 input 会被这类编辑器拒收，必须走 execCommand 原生编辑流
+      if (e.isComposing) return;
       const host = el.closest('[contenteditable]:not([contenteditable="false"])') || el;
-      send({ kind: 'input', sel: selectorFor(host), html: host.innerHTML });
+      const r = host.getBoundingClientRect();
+      send({
+        kind: 'input',
+        sel: selectorFor(host),
+        html: host.innerHTML,
+        ins: e.data ?? null,
+        vx: r.width || r.height ? (r.left + r.width / 2) / innerWidth : null,
+        vy: r.height ? (r.top + r.height / 2) / innerHeight : null,
+      });
     }
   }
 
@@ -592,6 +605,27 @@
   }
 
   function replayInput(ev) {
+    // 增量文本（输入法上屏/编辑命令）优先走 execCommand：直接改 DOM + 合成 input
+    // 会被自绘/受控编辑器拒收，execCommand 产生浏览器原生编辑流（带 inputType），
+    // 应用模型照常更新；目标页还没打开编辑器时，在相同位置回放双击让应用
+    // 打开编辑器后重试插入（自绘表格的编辑器是惰性创建的）。
+    if (ev.ins) {
+      let host = resolveSelector(ev.sel);
+      if (!host && ev.vx != null) host = findEditableAt(ev.vx, ev.vy);
+      if (host) { insertTextInto(host, ev.ins); return; }
+      if (ev.vx != null) {
+        synthClickAt(ev.vx, ev.vy, 2);
+        let done = false;
+        const tryInsert = () => {
+          if (done) return;
+          const h = findEditableAt(ev.vx, ev.vy);
+          if (h) { done = true; insertTextInto(h, ev.ins); }
+        };
+        setTimeout(tryInsert, 120);
+        setTimeout(tryInsert, 350);
+        return;
+      }
+    }
     const el = resolveSelector(ev.sel);
     if (!el || isSensitive(el)) return;
     if (ev.html != null) {
@@ -602,6 +636,42 @@
       setNativeValue(el, ev.value);
     }
     el.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true }));
+  }
+
+  // 视口比例坐标下找到可编辑元素（自上而下找 contenteditable 祖先）
+  function findEditableAt(vx, vy) {
+    let el = elementAtViewportRatio(vx, vy);
+    while (el) {
+      if (el instanceof HTMLElement && el.isContentEditable) return el;
+      el = el.parentElement;
+    }
+    return null;
+  }
+
+  function insertTextInto(host, text) {
+    if (host && typeof host.focus === 'function' && deepActiveElement() !== host) {
+      host.focus({ preventScroll: true });
+    }
+    try { return document.execCommand('insertText', false, text); } catch { return false; }
+  }
+
+  // 在视口坐标处回放一次点击序列（detail=2 为双击），让自绘应用打开编辑器。
+  // 合成事件（isTrusted=false）不会被自身捕获逻辑再次广播，无回环。
+  function synthClickAt(vx, vy, detail) {
+    const x = Math.max(0, Math.min((vx ?? 0) * innerWidth, innerWidth - 1));
+    const y = Math.max(0, Math.min((vy ?? 0) * innerHeight, innerHeight - 1));
+    const el = document.elementFromPoint(x, y);
+    if (!el) return;
+    const base = { bubbles: true, cancelable: true, composed: true, view: window, clientX: x, clientY: y, button: 0, detail };
+    const ptr = { pointerId: 1, pointerType: 'mouse', isPrimary: true };
+    el.dispatchEvent(new PointerEvent('pointerdown', { ...base, ...ptr, buttons: 1 }));
+    el.dispatchEvent(new MouseEvent('mousedown', { ...base, buttons: 1 }));
+    const focusable = el.closest(FOCUSABLE);
+    if (focusable && typeof focusable.focus === 'function') focusable.focus({ preventScroll: true });
+    el.dispatchEvent(new PointerEvent('pointerup', { ...base, ...ptr, buttons: 0 }));
+    el.dispatchEvent(new MouseEvent('mouseup', { ...base, buttons: 0 }));
+    el.dispatchEvent(new MouseEvent('click', { ...base, buttons: 0 }));
+    if (detail === 2) el.dispatchEvent(new MouseEvent('dblclick', { ...base, buttons: 0 }));
   }
 
   function replayChange(ev) {

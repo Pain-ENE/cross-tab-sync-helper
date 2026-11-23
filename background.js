@@ -358,10 +358,24 @@ function enqueue(tabId, job) {
 }
 
 async function replayInto(tabId, ev, precise) {
+  // 输入法上屏的增量文本：精确模式用 CDP Input.insertText（真实输入通道，
+  // 对拒收合成事件的自绘编辑器也 100% 有效）；编辑器未聚焦时静默失败
+  // 回退普通回放
+  if (precise && ev.kind === 'input' && ev.ins && await preciseInsertText(tabId, ev)) return;
   if (precise && ev.kind === 'click' && await preciseClick(tabId, ev)) return;
   if (precise && ev.kind === 'key' && await preciseKey(tabId, ev)) return;
   // 不指定 frameId：消息发给所有框架，匹配的框架按 FRAME_KEY 过滤
   await chrome.tabs.sendMessage(tabId, { type: 'mts:replay', event: ev }).catch(() => {});
+}
+
+async function preciseInsertText(tabId, ev) {
+  try {
+    await attachDebugger(tabId);
+    await cdp(tabId, 'Input.insertText', { text: ev.ins });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------
