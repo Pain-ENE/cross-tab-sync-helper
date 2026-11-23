@@ -473,13 +473,38 @@ async function tileTabs(screen) {
   const { tabIds } = await getState();
   const n = tabIds.length;
   if (!n) return;
-  const cols = n <= 3 ? n : Math.ceil(Math.sqrt(n));
+  // 画布先与所在显示器的工作区求交集：主窗口被拖出屏幕、DPI 混合缩放或多显示器
+  // 负坐标时，按画布直接算出的子窗口 bounds 可能超出可用区——浏览器会拒绝整套
+  // 坐标，导致所有新窗口叠在默认位置。钳制进工作区后请求始终合法。
+  try {
+    const displays = await chrome.system.display.getAll();
+    let best = null, bestArea = 0;
+    for (const d of displays) {
+      const wa = d.workArea;
+      const ix = Math.max(0, Math.min(screen.left + screen.width, wa.left + wa.width) - Math.max(screen.left, wa.left));
+      const iy = Math.max(0, Math.min(screen.top + screen.height, wa.top + wa.height) - Math.max(screen.top, wa.top));
+      if (ix * iy > bestArea) { bestArea = ix * iy; best = wa; }
+    }
+    if (best) {
+      const l = Math.max(screen.left, best.left);
+      const t = Math.max(screen.top, best.top);
+      const r = Math.min(screen.left + screen.width, best.left + best.width);
+      const b = Math.min(screen.top + screen.height, best.top + best.height);
+      // 交集太小（如窗口大部分在屏外）时保留原画布，避免生成过小窗口
+      if (r - l >= 480 && b - t >= 320) screen = { left: l, top: t, width: r - l, height: b - t };
+    }
+  } catch { /* 拿不到显示器信息时按原画布计算，不阻断平铺 */ }
+  // Chromium 在 Windows 的最小窗口宽约 500px：低于它窗口会被钳到最小宽甚至整套拒绝，
+  // 导致同列窗口叠压。列数按“画布能容纳几个最小宽窗口”钳制，放不下时自动改竖排
+  const MIN_W = 520;
+  const scrW = Math.max(screen.width || 1280, 480);
+  const scrH = Math.max(screen.height || 720, 320);
+  const maxCols = Math.max(1, Math.floor(scrW / MIN_W));
+  const cols = Math.min(n <= 3 ? n : Math.ceil(Math.sqrt(n)), maxCols);
   const rows = Math.ceil(n / cols);
   // 窗口尺寸给下限，防止小屏/页数多时生成过小窗口导致创建失败；
   // 越界位置钳回屏幕内
-  const scrW = Math.max(screen.width || 1280, 480);
-  const scrH = Math.max(screen.height || 720, 320);
-  const width = Math.max(480, Math.floor(scrW / cols));
+  const width = Math.max(MIN_W, Math.floor(scrW / cols));
   const height = Math.max(320, Math.floor(scrH / rows));
   // 给系统边框/任务栏留余量，避免窗口尺寸与屏幕精确压线导致创建被拒
   const safeW = Math.max(320, Math.min(width, scrW - 16));
@@ -499,7 +524,11 @@ async function tileTabs(screen) {
         if (win.state !== 'normal') await chrome.windows.update(win.id, { state: 'normal' });
         await chrome.windows.update(win.id, bounds);
       } else {
-        await chrome.windows.create({ tabId, ...bounds });
+        const created = await chrome.windows.create({ tabId, ...bounds });
+        // create 的 bounds 在部分环境（最小窗宽限制、窗口超出屏幕、虚拟显示）会被整套忽略，
+        // 窗口落到默认位置尺寸；实测 update 对已存在窗口的摆位宽容得多。
+        // create 负责拆窗、update 负责摆位，两步配合保证窗口真正各就各位
+        if (created && created.id) await chrome.windows.update(created.id, bounds);
       }
     } catch (err) {
       console.debug('[跨标签页操作同步助手] 平铺单个窗口失败', tabId, err.message);
@@ -576,6 +605,13 @@ chrome.commands.onCommand.addListener(async (command, tab) => {
       const adding = !s.tabIds.includes(active.id);
       s.tabIds = adding ? [...s.tabIds, active.id] : s.tabIds.filter((t) => t !== active.id);
     });
+  } else if (command === 'tile') {
+    // Alt+Shift+S：一键把勾选的标签页并排平铺。
+    // 以当前主窗口区域为基准铺网格——页面缩放或窗口挪动后视野受限时，
+    // 不用回到弹窗点按钮，直接按快捷键以当前窗口为画布重排
+    const win = await chrome.windows.getLastFocused().catch(() => null);
+    if (!win) return;
+    tileTabs({ left: win.left || 0, top: win.top || 0, width: win.width || 1280, height: win.height || 720 });
   }
 });
 

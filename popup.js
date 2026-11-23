@@ -144,6 +144,11 @@ function render() {
     if (el.type === 'checkbox') el.checked = !!v;
     else el.value = v;
   }
+  // 勾选计数与平铺按钮状态先于列表同步更新：批量复制后立即可见反馈，
+  // 不被标签页列表的异步渲染（逐行权限探测）拖慢
+  const n = state.tabIds.length;
+  $('#count').textContent = n ? `已选 ${n} 个` : '至少勾选 2 个';
+  $('#tile').disabled = n < 1;
   renderExcluded();
   renderTabs();
 }

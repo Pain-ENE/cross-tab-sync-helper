@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "跨标签页操作同步助手",
-  "version": "1.6.3",
+  "version": "1.7.0",
   "description": "把一个标签页的点击、键盘输入、滚动和页面跳转实时同步到勾选的其他标签页，适合批量录入、档案归档、统一勾选等重复操作。可把各标签页内容不同的字段（如编号）设为不同步，避免互相覆盖。",
   "author": {
     "email": "chrome@aysner.at"
@@ -11,7 +11,8 @@
     "scripting",
     "storage",
     "debugger",
-    "notifications"
+    "notifications",
+    "system.display"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -50,9 +51,15 @@
     },
     "toggle-tab": {
       "suggested_key": {
-        "default": "Alt+Shift+A"
+        "default": "Alt+Shift+G"
       },
       "description": "把当前标签页加入/移出同步组"
+    },
+    "tile": {
+      "suggested_key": {
+        "default": "Alt+Shift+S"
+      },
+      "description": "将勾选的标签页分窗口并排排列（以当前主窗口区域为基准）"
     }
   }
 }
