@@ -209,7 +209,9 @@
       setTimeout(() => ripple.remove(), 500);
     }
     clearTimeout(ghostTimer);
-    ghostTimer = setTimeout(() => { if (ghostEl) ghostEl.style.opacity = '0'; }, 1500);
+    // 按住（左键未松开）时常显不淡出：长按不动也能看到绿鼠标的按住状态，
+    // 直到 press(on:false) 到达后再启动淡出
+    if (!pressed) ghostTimer = setTimeout(() => { if (ghostEl) ghostEl.style.opacity = '0'; }, 1500);
   }
 
   function removeGhost() {
@@ -259,20 +261,30 @@
   }
 
   // 捕获真实鼠标移动（节流 ~25次/秒）；镜像元素本身不产生事件，无回环。
-  // 只有主控页广播：悬停划过其他窗口不会引起绿鼠标跳动（v1.6）
+  // 只有主控页广播：悬停划过其他窗口不会引起绿鼠标跳动（v1.6）；
+  // 按住中（拖选会话）放宽主控门控——按下本身就是接管信号（v1.6.2）。
+  // 按下后位移超过阈值 → 进入拖选会话：先补发起点 mousedown，
+  // 随后的按住移动在目标页逐点回放，实现跨窗口拖选复制。
   function onMouseMove(e) {
     if (!e.isTrusted) return;
     if (pickerActive) return;
-    if (!leaderSelf) return;
+    if (!leaderSelf && !dragAnchor) return;
+    const vx = e.clientX / innerWidth;
+    const vy = e.clientY / innerHeight;
+    if (dragAnchor && e.buttons === 1 && !dragging) {
+      const dx = e.clientX - dragAnchor.vx * innerWidth;
+      const dy = e.clientY - dragAnchor.vy * innerHeight;
+      if (Math.hypot(dx, dy) > 6) {
+        dragging = true;
+        send({ kind: 'dragstart', vx: dragAnchor.vx, vy: dragAnchor.vy });
+      }
+    }
     const now = performance.now();
     if (now - lastCursorSent < 40) return;
     lastCursorSent = now;
-    send({
-      kind: 'cursor',
-      vx: e.clientX / innerWidth,
-      vy: e.clientY / innerHeight,
-      pressed: e.buttons === 1,
-    });
+    // 拖选会话中的移动走 dragmove 通道（受"鼠标点击"开关控制，与镜像
+    // 开关无关），目标页逐点回放按住移动；非拖选时为普通 cursor
+    send({ kind: dragging ? 'dragmove' : 'cursor', vx, vy, pressed: e.buttons === 1 });
   }
 
   function replayCursor(ev) {
@@ -416,6 +428,9 @@
   function onClick(e) {
     if (!e.isTrusted || e.button !== 0) return;
     if (pickerActive) return;
+    // 拖选结束后的补发 click 不是点击语义，不再广播（拖选已由
+    // dragstart/dragend 序列完整同步），避免目标页多出一次单击
+    if (dragEndAt && performance.now() - dragEndAt < 350) { dragEndAt = 0; return; }
     const el = eventTarget(e);
     if (!(el instanceof Element)) return;
 
@@ -449,6 +464,46 @@
     if (!(el instanceof Element)) return;
     if (isExcluded(el)) return;
     send({ kind: 'focus', sel: selectorFor(el) });
+  }
+
+  // ---------------------------------------------------------------------------
+  // 捕获：按住 / 拖选 / 右键（v1.6.2）
+  // - 左键按下即广播 press：其他窗口的绿鼠标立即进入按住状态且长按不淡出；
+  //   按下本身也是主控接管信号（比 click 更早，长按期间即完成切换）
+  // - 按下后位移超过阈值 → 拖选会话（dragstart 补发起点 + 按住移动逐点回放
+  //   + dragend 松开），跨窗口复制拖选/框选；不补发 click（拖选不是点击）
+  // - 右键广播 contextmenu：目标页回放自绘菜单。浏览器原生右键菜单不受
+  //   合成事件影响，无自绘菜单的页面无副作用
+  // ---------------------------------------------------------------------------
+  let dragAnchor = null;   // {vx, vy} 左键按下起点
+  let dragging = false;    // 拖选会话进行中
+  let dragEndAt = 0;       // 拖选结束时间（用于吞掉紧随的 click 广播）
+
+  function onPointerDown(e) {
+    if (!e.isTrusted || pickerActive) return;
+    if (e.button !== 0) return;
+    dragAnchor = { vx: e.clientX / innerWidth, vy: e.clientY / innerHeight };
+    dragging = false;
+    send({ kind: 'press', vx: dragAnchor.vx, vy: dragAnchor.vy, on: true });
+  }
+
+  function onPointerUp(e) {
+    if (!e.isTrusted || pickerActive) return;
+    if (e.button !== 0) return;
+    const vx = e.clientX / innerWidth;
+    const vy = e.clientY / innerHeight;
+    if (dragging) {
+      send({ kind: 'dragend', vx, vy });
+      dragEndAt = performance.now();
+    }
+    dragging = false;
+    dragAnchor = null;
+    send({ kind: 'press', vx, vy, on: false });
+  }
+
+  function onContextMenu(e) {
+    if (!e.isTrusted || pickerActive) return;
+    send({ kind: 'contextmenu', vx: e.clientX / innerWidth, vy: e.clientY / innerHeight });
   }
 
   // ---------------------------------------------------------------------------
@@ -655,23 +710,35 @@
     try { return document.execCommand('insertText', false, text); } catch { return false; }
   }
 
-  // 在视口坐标处回放一次点击序列（detail=2 为双击），让自绘应用打开编辑器。
+  // 在视口坐标处回放点击序列（detail=2 为双击），让自绘应用打开编辑器。
+  // 双击按真实浏览器的两次完整 down/up 序列复刻（detail 1→2），
+  // 应用依赖第一次点击选中目标、第二次进入编辑态的逻辑才能正确触发。
   // 合成事件（isTrusted=false）不会被自身捕获逻辑再次广播，无回环。
   function synthClickAt(vx, vy, detail) {
     const x = Math.max(0, Math.min((vx ?? 0) * innerWidth, innerWidth - 1));
     const y = Math.max(0, Math.min((vy ?? 0) * innerHeight, innerHeight - 1));
     const el = document.elementFromPoint(x, y);
     if (!el) return;
-    const base = { bubbles: true, cancelable: true, composed: true, view: window, clientX: x, clientY: y, button: 0, detail };
     const ptr = { pointerId: 1, pointerType: 'mouse', isPrimary: true };
-    el.dispatchEvent(new PointerEvent('pointerdown', { ...base, ...ptr, buttons: 1 }));
-    el.dispatchEvent(new MouseEvent('mousedown', { ...base, buttons: 1 }));
+    const mk = (d, buttons) => ({ bubbles: true, cancelable: true, composed: true, view: window, clientX: x, clientY: y, button: 0, buttons, detail: d });
     const focusable = el.closest(FOCUSABLE);
     if (focusable && typeof focusable.focus === 'function') focusable.focus({ preventScroll: true });
-    el.dispatchEvent(new PointerEvent('pointerup', { ...base, ...ptr, buttons: 0 }));
-    el.dispatchEvent(new MouseEvent('mouseup', { ...base, buttons: 0 }));
-    el.dispatchEvent(new MouseEvent('click', { ...base, buttons: 0 }));
-    if (detail === 2) el.dispatchEvent(new MouseEvent('dblclick', { ...base, buttons: 0 }));
+    const fireDown = (d) => {
+      el.dispatchEvent(new PointerEvent('pointerdown', { ...mk(d, 1), ...ptr }));
+      el.dispatchEvent(new MouseEvent('mousedown', mk(d, 1)));
+    };
+    const fireUp = (d) => {
+      el.dispatchEvent(new PointerEvent('pointerup', { ...mk(d, 0), ...ptr }));
+      el.dispatchEvent(new MouseEvent('mouseup', mk(d, 0)));
+      el.dispatchEvent(new MouseEvent('click', mk(d, 0)));
+    };
+    fireDown(1);
+    fireUp(1);
+    if (detail === 2) {
+      fireDown(2);
+      fireUp(2);
+      el.dispatchEvent(new MouseEvent('dblclick', mk(2, 0)));
+    }
   }
 
   function replayChange(ev) {
@@ -689,6 +756,65 @@
     el.dispatchEvent(new Event('change', { bubbles: true }));
   }
 
+  // ---------------------------------------------------------------------------
+  // 回放：按住 / 拖选 / 右键（v1.6.2）
+  // 目标页的拖选会话：dragstart 开启（补发起点按下）→ dragmove 逐点回放
+  // 按住移动 → dragend 松开；合成事件 isTrusted=false 不会被自身捕获
+  // 逻辑再广播，无回环。合成 contextmenu 不触发浏览器原生右键菜单，
+  // 只有页面自绘菜单（如在线表格）会响应。
+  // ---------------------------------------------------------------------------
+  let dragSession = false;
+
+  function synthMouseAt(vx, vy, phase, button = 0) {
+    const x = Math.max(0, Math.min((vx ?? 0) * innerWidth, innerWidth - 1));
+    const y = Math.max(0, Math.min((vy ?? 0) * innerHeight, innerHeight - 1));
+    const el = document.elementFromPoint(x, y);
+    if (!el) return null;
+    const buttons = phase === 'down' || phase === 'move' ? (button === 2 ? 2 : 1) : 0;
+    const base = { bubbles: true, cancelable: true, composed: true, view: window, clientX: x, clientY: y, button, buttons, detail: 1 };
+    const ptr = { pointerId: 1, pointerType: 'mouse', isPrimary: true };
+    if (phase === 'down') {
+      el.dispatchEvent(new PointerEvent('pointerdown', { ...base, ...ptr }));
+      el.dispatchEvent(new MouseEvent('mousedown', base));
+    } else if (phase === 'move') {
+      el.dispatchEvent(new PointerEvent('pointermove', { ...base, ...ptr }));
+      el.dispatchEvent(new MouseEvent('mousemove', base));
+    } else if (phase === 'up') {
+      el.dispatchEvent(new PointerEvent('pointerup', { ...base, ...ptr }));
+      el.dispatchEvent(new MouseEvent('mouseup', base));
+    } else if (phase === 'menu') {
+      el.dispatchEvent(new MouseEvent('mousedown', { ...base, button: 2, buttons: 2 }));
+      el.dispatchEvent(new MouseEvent('mouseup', { ...base, button: 2, buttons: 0 }));
+      el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, composed: true, view: window, clientX: x, clientY: y, button: 2, buttons: 0 }));
+    }
+    return el;
+  }
+
+  function replayPress(ev) {
+    if (!ghostOn) return;
+    showGhost(ev.vx, ev.vy, !!ev.on, false);
+  }
+
+  function replayDragStart(ev) {
+    dragSession = true;
+    synthMouseAt(ev.vx, ev.vy, 'down');
+  }
+
+  function replayDragMove(ev) {
+    synthMouseAt(ev.vx, ev.vy, 'move');
+    if (ghostOn) showGhost(ev.vx, ev.vy, true, false);
+  }
+
+  function replayDragEnd(ev) {
+    synthMouseAt(ev.vx, ev.vy, 'up');
+    dragSession = false;
+  }
+
+  function replayContextMenu(ev) {
+    if (ghostOn) showGhost(ev.vx, ev.vy, false, true);
+    synthMouseAt(ev.vx, ev.vy, 'menu', 2);
+  }
+
   const REPLAY = {
     scroll: replayScroll,
     click: replayClick,
@@ -697,6 +823,11 @@
     input: replayInput,
     change: replayChange,
     cursor: replayCursor,
+    press: replayPress,
+    dragstart: replayDragStart,
+    dragmove: replayDragMove,
+    dragend: replayDragEnd,
+    contextmenu: replayContextMenu,
   };
 
   // 精确模式用：计算目标元素在顶层视口中的坐标
@@ -915,6 +1046,9 @@
   document.addEventListener('scroll', onScroll, { capture: true, passive: true, signal });
   document.addEventListener('click', onClick, capture);
   document.addEventListener('mousemove', onMouseMove, { capture: true, passive: true, signal });
+  document.addEventListener('pointerdown', onPointerDown, capture);
+  document.addEventListener('pointerup', onPointerUp, capture);
+  document.addEventListener('contextmenu', onContextMenu, capture);
   document.addEventListener('focusin', onFocusIn, capture);
   document.addEventListener('keydown', onKey, capture);
   document.addEventListener('keyup', onKey, capture);

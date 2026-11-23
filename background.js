@@ -17,7 +17,7 @@ const DEFAULT_STATE = {
   },
 };
 
-const CATEGORY = { scroll: 'scroll', click: 'click', focus: 'click', key: 'keys', input: 'keys', change: 'keys', cursor: 'ghost' };
+const CATEGORY = { scroll: 'scroll', click: 'click', focus: 'click', key: 'keys', input: 'keys', change: 'keys', cursor: 'ghost', press: 'ghost', dragstart: 'click', dragmove: 'click', dragend: 'click', contextmenu: 'click' };
 
 // 在某标签页回放事件后的一小段时间内忽略来自该页的事件，
 // 防止回放引发的滚动、聚焦、输入等再次被广播出去（回环）。
