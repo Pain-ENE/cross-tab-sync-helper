@@ -168,6 +168,50 @@ $('#tile').addEventListener('click', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// 批量复制当前标签页：复制 N 份并自动加入同步组。
+// 与勾选一样不自动开启同步，保证“先填各自编号再开同步”的流程
+// 不被打断；复制会连带已填的表单内容，建议在空白模板页上复制。
+// ---------------------------------------------------------------------------
+let dupMsgTimer = 0;
+
+function showDupMsg(text, isError) {
+  const el = $('#dupMsg');
+  el.textContent = text;
+  el.classList.toggle('error', !!isError);
+  clearTimeout(dupMsgTimer);
+  dupMsgTimer = setTimeout(() => { el.textContent = ''; el.classList.remove('error'); }, 2600);
+}
+
+async function duplicateActive(n) {
+  const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  if (!active) return showDupMsg('未找到当前标签页', true);
+  const url = active.url || active.pendingUrl || '';
+  if (RESTRICTED.test(url)) return showDupMsg('当前页面类型不允许加入同步组', true);
+  const ids = [];
+  for (let i = 0; i < n; i++) {
+    try { ids.push((await chrome.tabs.duplicate(active.id)).id); } catch { break; }
+  }
+  if (!ids.length) return showDupMsg('复制失败，请重试', true);
+  await save((s) => {
+    const fresh = ids.filter((id) => !s.tabIds.includes(id));
+    s.tabIds = [...s.tabIds, ...fresh];
+  });
+  showDupMsg(`已复制 ${ids.length} 份并加入同步组`);
+}
+
+for (const btn of document.querySelectorAll('.dup-quick')) {
+  btn.addEventListener('click', () => duplicateActive(Number(btn.dataset.n)));
+}
+$('#dupGo').addEventListener('click', () => {
+  const n = Number($('#dupN').value);
+  if (!Number.isInteger(n) || n < 1 || n > 16) return showDupMsg('请输入 1–16 的份数', true);
+  duplicateActive(n);
+});
+$('#dupN').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') $('#dupGo').click();
+});
+
 const addBtn = $('#addExcluded');
 addBtn.addEventListener('click', async () => {
   const status = await chrome.runtime.sendMessage({ type: 'mts:picker-status' }).catch(() => ({ on: false }));

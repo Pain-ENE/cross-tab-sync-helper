@@ -131,13 +131,17 @@
   }
 
   // ---------------------------------------------------------------------------
-  // 镜像鼠标（ghost cursor）：
+  // 镜像鼠标（ghost cursor，Apple 风格）：
   // 在其他标签页上显示主控页鼠标的位置与动作，方便平铺核对时
-  // 一眼看到主控窗口正在哪里操作。绿色箭头与真实鼠标（白色）
-  // 明显区分——哪个窗口没有绿鼠标，哪个就是主控窗口。
-  // 绿鼠标不会产生任何事件（pointer-events:none），不会造成回环。
+  // 一眼看到主控窗口正在哪里操作。Apple 系统绿渐变箭头 + 白描边 +
+  // 柔光晕，与系统真实鼠标（黑箭头、无光晕）明显区分。
+  // 主控身份由 Service Worker 下发：只有当前主控页广播鼠标位置，
+  // 其他页的悬停划过不会引起绿鼠标跳动——点击/滚动/键盘才接管主控；
+  // 主控页四边亮绿色主控光环，切换瞬间一眼可辨。
+  // 绿鼠标与光环均不产生事件（pointer-events:none），不会造成回环。
   // ---------------------------------------------------------------------------
   let ghostOn = true;         // 由 Service Worker 下发的镜像开关
+  let leaderSelf = false;     // 本页是否为当前主控（决定是否广播鼠标位置）
   let ghostEl = null;
   let ghostStyleEl = null;
   let ghostTimer = 0;
@@ -148,16 +152,20 @@
     ghostStyleEl = document.createElement('style');
     ghostStyleEl.textContent = `
       .mts-ghost-cursor { position: fixed; left: 0; top: 0; z-index: 2147483645;
-        pointer-events: none; opacity: 0; transition: opacity .25s; will-change: transform; }
-      .mts-ghost-cursor svg { display: block; filter: drop-shadow(0 2px 3px rgba(0,0,0,.45));
-        transition: transform .08s; }
-      .mts-ghost-cursor.pressed svg { transform: scale(.78); }
-      @keyframes mts-ghost-ripple { from { transform: scale(.3); opacity: .85; }
-        to { transform: scale(2.6); opacity: 0; } }
+        pointer-events: none; opacity: 0;
+        transition: opacity .3s cubic-bezier(.28,.11,.32,1); will-change: transform; }
+      .mts-ghost-cursor svg { display: block;
+        filter: drop-shadow(0 1px 2px rgba(0,0,0,.4)) drop-shadow(0 0 9px rgba(52,199,89,.55));
+        transition: transform .1s cubic-bezier(.28,.11,.32,1), filter .1s cubic-bezier(.28,.11,.32,1); }
+      .mts-ghost-cursor.pressed svg { transform: scale(.78);
+        filter: drop-shadow(0 1px 2px rgba(0,0,0,.4)) drop-shadow(0 0 5px rgba(52,199,89,.45)) brightness(.92); }
+      @keyframes mts-ghost-ripple { from { transform: scale(.35); opacity: .9; }
+        to { transform: scale(2.3); opacity: 0; } }
       .mts-ghost-ripple { position: fixed; z-index: 2147483644; pointer-events: none;
-        width: 34px; height: 34px; margin: -17px 0 0 -4px; border-radius: 50%;
-        background: rgba(34, 197, 94, .35); border: 2px solid #16a34a;
-        animation: mts-ghost-ripple .45s ease-out forwards; }`;
+        width: 40px; height: 40px; margin: -20px 0 0 -7px; border-radius: 50%;
+        background: radial-gradient(circle, rgba(52,199,89,.38) 0%, rgba(52,199,89,.14) 55%, rgba(52,199,89,0) 72%);
+        box-shadow: 0 0 14px rgba(52,199,89,.35);
+        animation: mts-ghost-ripple .5s cubic-bezier(.28,.11,.32,1) forwards; }`;
     document.documentElement.appendChild(ghostStyleEl);
   }
 
@@ -166,11 +174,20 @@
     ensureGhostStyle();
     ghostEl = document.createElement('div');
     ghostEl.className = 'mts-ghost-cursor';
-    // 箭头与系统白色鼠标形状一致，但填充亮绿色便于一眼区分
+    // Apple 风格指针：系统绿（#34c759 系）渐变填充 + 白描边 + 柔和绿光晕，
+    // 与系统真实鼠标（黑箭头白边、无光晕）在深浅页面上都一眼可辨。
+    // 渐变 id 加随机后缀，避免同页多框架注入时互相冲突。
+    const gradId = 'mts-ghost-grad-' + Math.random().toString(36).slice(2, 8);
     ghostEl.innerHTML = `<svg width="26" height="26" viewBox="0 0 24 24">
+      <defs>
+        <linearGradient id="${gradId}" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#3ecf6a"/>
+          <stop offset="1" stop-color="#2ea84f"/>
+        </linearGradient>
+      </defs>
       <path d="M5.5 2.2 L5.5 20.5 c0 .5.55.72.87.38 l4.4-4.7 a.5.5 0 0 1 .38-.17 l4.9.15
                c.4 0 .6-.5.33-.8 L6.9 2.05 a.5.5 0 0 0-.9.15 z"
-        fill="#22c55e" stroke="#0f5132" stroke-width="1.2" stroke-linejoin="round"/>
+        fill="url(#${gradId})" stroke="#ffffff" stroke-width="1.5" stroke-linejoin="round"/>
     </svg>`;
     document.documentElement.appendChild(ghostEl);
     return ghostEl;
@@ -201,10 +218,52 @@
     if (ghostStyleEl) { ghostStyleEl.remove(); ghostStyleEl = null; }
   }
 
-  // 捕获真实鼠标移动（节流 ~25次/秒）；镜像元素本身不产生事件，无回环
+  // ---------------------------------------------------------------------------
+  // 主控光环（leader ring，Apple focus ring 风格）：
+  // 同步开启时，主控窗口四边显示一圈柔和的绿色光环。主控切换瞬间
+  // 旧窗口光环熄灭、新窗口亮起，与"没有绿鼠标的窗口就是主控"
+  // 形成双重确认，消除切换瞬间的歧义。仅顶层框架渲染。
+  // ---------------------------------------------------------------------------
+  let leaderRingEl = null;
+  let leaderStyleEl = null;
+
+  function ensureLeaderStyle() {
+    if (leaderStyleEl) return;
+    leaderStyleEl = document.createElement('style');
+    leaderStyleEl.textContent = `
+      .mts-leader-ring { position: fixed; inset: 0; z-index: 2147483643;
+        pointer-events: none; opacity: 0; transition: opacity .35s cubic-bezier(.28,.11,.32,1); }
+      .mts-leader-ring::before { content: ""; position: absolute; inset: 0;
+        box-shadow: inset 0 0 0 2px rgba(52,199,89,.8), inset 0 0 18px rgba(52,199,89,.14); }
+      .mts-leader-ring.on { opacity: 1; }`;
+    document.documentElement.appendChild(leaderStyleEl);
+  }
+
+  function setLeaderRing(on) {
+    if (on) {
+      ensureLeaderStyle();
+      if (!leaderRingEl) {
+        leaderRingEl = document.createElement('div');
+        leaderRingEl.className = 'mts-leader-ring';
+        document.documentElement.appendChild(leaderRingEl);
+      }
+      leaderRingEl.classList.add('on');
+    } else if (leaderRingEl) {
+      leaderRingEl.classList.remove('on');
+    }
+  }
+
+  function removeLeaderRing() {
+    if (leaderRingEl) { leaderRingEl.remove(); leaderRingEl = null; }
+    if (leaderStyleEl) { leaderStyleEl.remove(); leaderStyleEl = null; }
+  }
+
+  // 捕获真实鼠标移动（节流 ~25次/秒）；镜像元素本身不产生事件，无回环。
+  // 只有主控页广播：悬停划过其他窗口不会引起绿鼠标跳动（v1.6）
   function onMouseMove(e) {
     if (!e.isTrusted) return;
     if (pickerActive) return;
+    if (!leaderSelf) return;
     const now = performance.now();
     if (now - lastCursorSent < 40) return;
     lastCursorSent = now;
@@ -596,7 +655,7 @@
       : '✖ 同步已关闭，各页操作恢复独立';
     toastEl.style.cssText = 'position:fixed;left:50%;top:14px;transform:translateX(-50%);z-index:2147483646;'
       + 'max-width:90vw;padding:10px 18px;border-radius:24px;color:#fff;'
-      + `background:${on ? '#15803d' : '#475569'};`
+      + `background:${on ? '#34c759' : '#48484a'};`
       + 'font:14px/1.4 "Microsoft YaHei",sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.25);'
       + 'opacity:1;transition:opacity .4s;pointer-events:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
     document.documentElement.appendChild(toastEl);
@@ -734,6 +793,11 @@
           sendResponse(true);
         }
         return;
+      case 'mts:leader':
+        // Service Worker 下发主控身份（点击/滚动/键盘接管时触发）
+        leaderSelf = !!msg.on;
+        if (FRAME_KEY === 'top') setLeaderRing(leaderSelf);
+        return;
       case 'mts:teardown':
         teardown();
         return;
@@ -748,6 +812,10 @@
         if (wantGhost !== ghostOn) {
           ghostOn = wantGhost;
           if (!ghostOn) removeGhost(); // 关闭镜像鼠标时立即移除已显示的绿鼠标
+        }
+        if (msg.leader !== undefined) {
+          leaderSelf = !!msg.leader;
+          if (FRAME_KEY === 'top') setLeaderRing(leaderSelf);
         }
         if (FRAME_KEY === 'top') sendResponse(true);
         return;
@@ -766,6 +834,7 @@
   function teardown() {
     setPicker(false);
     removeGhost();
+    removeLeaderRing();
     ac.abort();
     if (scrollRaf) cancelAnimationFrame(scrollRaf);
     try { chrome.runtime.onMessage.removeListener(onMessage); } catch { /* 上下文已失效 */ }

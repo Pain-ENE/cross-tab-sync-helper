@@ -21,6 +21,18 @@
       <span class="hint" id="count"></span>
     </div>
     <ul id="tabs"></ul>
+    <div class="dup-row">
+      <span class="hint">把当前标签页复制多份并自动加入同步组：</span>
+      <div class="dup-btns">
+        <button type="button" class="dup-quick" data-n="2">2 份</button>
+        <button type="button" class="dup-quick" data-n="4">4 份</button>
+        <button type="button" class="dup-quick" data-n="6">6 份</button>
+        <button type="button" class="dup-quick" data-n="9">9 份</button>
+        <input id="dupN" type="number" min="1" max="16" step="1" placeholder="自定">
+        <button id="dupGo" type="button">复制</button>
+      </div>
+      <span class="hint dup-msg" id="dupMsg"></span>
+    </div>
     <button id="tile" type="button">将勾选的标签页分窗口并排排列</button>
   </section>
 
@@ -40,7 +52,7 @@
       <label><input type="checkbox" data-opt="nav"> 页面跳转</label>
       <label><input type="checkbox" data-opt="ghost"> 镜像鼠标</label>
     </div>
-    <p class="hint">镜像鼠标：你在哪个窗口操作，其他窗口就会显示一个绿色鼠标实时跟随你的移动与点击——哪个窗口没有绿鼠标，哪个就是主控窗口。</p>
+    <p class="hint">镜像鼠标：点击、滚动或键盘输入接管主控后，其他窗口显示绿色鼠标实时跟随（悬停划过不会误切换）；哪个窗口亮着绿色主控光环且没有绿鼠标，哪个就是主控窗口。</p>
     <label class="row">
       滚动位置
       <select data-opt="scrollMode">
@@ -64,7 +76,7 @@
   </section>
 
   <footer class="hint">
-    推荐流程：① 勾选标签页 → ② 保持开关关闭，逐个标签页填好各自不同的编号（或用"隔离字段"功能把编号框隔离）→ ③ 点「分窗口并排排列」把各页平铺同屏 → ④ 打开顶部开关，在任意窗口操作，其余同步跟随 → ⑤ 逐窗核对后手动提交（可把"提交"按钮也加入隔离，防止误点连带）。<br>
+    推荐流程：① 打开一个模板页，用「复制多份」生成 N 份（自动加入同步组；也可手动勾选） → ② 保持开关关闭，逐个标签页填好各自不同的编号（或用“隔离字段”把编号框隔离） → ③ 点「分窗口并排排列」把各页平铺同屏 → ④ 打开顶部开关，在任意窗口操作，其余同步跟随（点击/滚动/键盘接管主控，哪个窗口亮绿色光环哪个就是主控） → ⑤ 逐窗核对后手动提交（可把“提交”按钮也加入隔离，防止误点连带）。<br>
     快捷键：Alt+,（逗号）开启同步 · Alt+.（句号）关闭同步（每次切换各页会弹提示条，并伴随系统通知）· Alt+Shift+A 当前标签页加入/移出同步组。密码框永远不会被同步。
   </footer>
 

@@ -89,6 +89,17 @@ function setLeader(tabId) {
   if (leaderTabId === tabId) return;
   leaderTabId = tabId;
   chrome.storage.session.set({ leader: tabId });
+  broadcastLeader();
+}
+
+// 主控身份变更时通知所有参与页：新主控亮起绿色主控光环并开始
+// 广播鼠标位置，其余页熄灭光环、停止广播（悬停划过不再改变绿鼠标）
+async function broadcastLeader() {
+  const s = await getState();
+  if (!s.enabled) return;
+  for (const t of s.tabIds) {
+    chrome.tabs.sendMessage(t, { type: 'mts:leader', on: t === leaderTabId }).catch(() => {});
+  }
 }
 
 async function setTabError(tabId, message) {
@@ -174,14 +185,16 @@ function systemNotify(on, count) {
 }
 
 async function broadcastConfig(s = state) {
-  const msg = { type: 'mts:config', excluded: s.opts.excluded, ghost: !!s.opts.ghost };
-  for (const t of s.tabIds) chrome.tabs.sendMessage(t, msg).catch(() => {});
+  for (const t of s.tabIds) {
+    const msg = { type: 'mts:config', excluded: s.opts.excluded, ghost: !!s.opts.ghost, leader: t === leaderTabId };
+    chrome.tabs.sendMessage(t, msg).catch(() => {});
+  }
 }
 
 function updateBadge(s) {
   const n = s.tabIds.length;
   chrome.action.setBadgeText({ text: s.enabled && n ? String(n) : '' });
-  chrome.action.setBadgeBackgroundColor({ color: s.opts.precision ? '#c2410c' : '#15803d' });
+  chrome.action.setBadgeBackgroundColor({ color: s.opts.precision ? '#c2410c' : '#34c759' });
   chrome.action.setTitle({
     title: s.enabled
       ? `跨标签页操作同步助手：同步已开启（${n} 个标签页${s.opts.precision ? '，精确模式' : ''}）`
@@ -196,8 +209,8 @@ async function inject(tabId) {
   try {
     await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: ['content.js'] });
     await setTabError(tabId, null);
-    // 注入后下发当前字段隔离名单
-    chrome.tabs.sendMessage(tabId, { type: 'mts:config', excluded: state.opts.excluded, ghost: !!state.opts.ghost }).catch(() => {});
+    // 注入后下发当前字段隔离名单与主控身份
+    chrome.tabs.sendMessage(tabId, { type: 'mts:config', excluded: state.opts.excluded, ghost: !!state.opts.ghost, leader: tabId === leaderTabId }).catch(() => {});
   } catch (err) {
     await setTabError(tabId, err.message || String(err));
   }
@@ -310,7 +323,13 @@ async function handleEvent(ev, sender) {
   if (isQuiet(src)) return;
   if (!s.opts[CATEGORY[ev.kind]]) return;
 
-  setLeader(src);
+  if (ev.kind === 'cursor') {
+    // 鼠标位置镜像只有主控页有效：点击/滚动/键盘才会接管主控，
+    // 纯悬停划过其他窗口不广播，避免绿鼠标在平铺窗口间乱闪（v1.6）
+    if (src !== leaderTabId) return;
+  } else {
+    setLeader(src);
+  }
   if (ev.kind === 'scroll') ev.mode = s.opts.scrollMode;
   // 精确模式只用于来自顶层框架的事件（CDP 坐标基于主视口）
   const precise = s.opts.precision && sender.frameId === 0;

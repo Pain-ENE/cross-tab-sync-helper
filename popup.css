@@ -4,9 +4,21 @@
   --muted: #656d76;
   --border: #d8dee4;
   --row-hover: #f3f5f7;
-  --accent: #2563eb;
+  --accent: #0088ff;
   --warn: #c2410c;
   color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1c1e21;
+    --fg: #e6e8eb;
+    --muted: #9aa1a9;
+    --border: #3a3f45;
+    --row-hover: #26292d;
+    --accent: #0091ff;
+    --warn: #fb923c;
+  }
 }
 
 @media (prefers-color-scheme: dark) {
@@ -91,9 +103,11 @@ select, button {
   padding: 4px 8px;
 }
 
-button { width: 100%; padding: 6px 8px; cursor: pointer; }
+button { width: 100%; padding: 6px 8px; cursor: pointer;
+  transition: opacity .2s cubic-bezier(.28,.11,.32,1), transform .2s cubic-bezier(.28,.11,.32,1), border-color .2s; }
 button:hover:not(:disabled) { border-color: var(--accent); }
 button:disabled { opacity: .5; cursor: default; }
+button:active:not(:disabled) { transform: scale(.97); }
 
 .precision { background: color-mix(in srgb, var(--warn) 6%, transparent); }
 
@@ -137,6 +151,15 @@ footer { padding: 10px 14px; line-height: 1.5; }
 }
 #excluded .ex-remove:hover { color: var(--warn); }
 #addExcluded.active { border-color: var(--warn); color: var(--warn); }
+
+/* 批量复制当前标签页 */
+.dup-row { margin: 0 0 10px; }
+.dup-btns { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+.dup-quick { flex: 1; min-width: 0; padding: 5px 4px; font-size: 12px; }
+#dupN { width: 64px; text-align: center; }
+#dupGo { width: auto; padding: 5px 12px; }
+.dup-msg { min-height: 14px; margin-top: 4px; }
+.dup-msg.error { color: var(--warn); }
 
 /* Toggle-Switch */
 .switch { position: relative; flex: none; width: 34px; height: 20px; }
