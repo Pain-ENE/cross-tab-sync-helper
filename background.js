@@ -12,11 +12,12 @@ const DEFAULT_STATE = {
     nav: true,
     scrollMode: 'absolute', // 'absolute' | 'relative'
     precision: false,
+    ghost: true, // 镜像鼠标：在其他标签页显示主控页鼠标位置与动作
     excluded: [], // 不同步的字段：[{ key: 'name:xxx' | 'id:xxx', label: '显示名' }]
   },
 };
 
-const CATEGORY = { scroll: 'scroll', click: 'click', focus: 'click', key: 'keys', input: 'keys', change: 'keys' };
+const CATEGORY = { scroll: 'scroll', click: 'click', focus: 'click', key: 'keys', input: 'keys', change: 'keys', cursor: 'ghost' };
 
 // 在某标签页回放事件后的一小段时间内忽略来自该页的事件，
 // 防止回放引发的滚动、聚焦、输入等再次被广播出去（回环）。
@@ -128,8 +129,9 @@ async function reconcile(prev, next, announce = true) {
   for (const t of nextDbg) if (!prevDbg.includes(t)) attachDebugger(t).catch(() => {});
   for (const t of prevDbg) if (!nextDbg.includes(t)) detachDebugger(t);
 
-  // 字段隔离名单有变化 -> 通知所有相关标签页
-  if (JSON.stringify(prev.opts.excluded) !== JSON.stringify(next.opts.excluded)) {
+  // 字段隔离名单 / 镜像鼠标开关有变化 -> 通知所有相关标签页
+  if (JSON.stringify(prev.opts.excluded) !== JSON.stringify(next.opts.excluded)
+      || !!prev.opts.ghost !== !!next.opts.ghost) {
     broadcastConfig(next);
   }
 
@@ -172,7 +174,7 @@ function systemNotify(on, count) {
 }
 
 async function broadcastConfig(s = state) {
-  const msg = { type: 'mts:config', excluded: s.opts.excluded };
+  const msg = { type: 'mts:config', excluded: s.opts.excluded, ghost: !!s.opts.ghost };
   for (const t of s.tabIds) chrome.tabs.sendMessage(t, msg).catch(() => {});
 }
 
@@ -195,7 +197,7 @@ async function inject(tabId) {
     await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: ['content.js'] });
     await setTabError(tabId, null);
     // 注入后下发当前字段隔离名单
-    chrome.tabs.sendMessage(tabId, { type: 'mts:config', excluded: state.opts.excluded }).catch(() => {});
+    chrome.tabs.sendMessage(tabId, { type: 'mts:config', excluded: state.opts.excluded, ghost: !!state.opts.ghost }).catch(() => {});
   } catch (err) {
     await setTabError(tabId, err.message || String(err));
   }

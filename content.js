@@ -131,6 +131,97 @@
   }
 
   // ---------------------------------------------------------------------------
+  // 镜像鼠标（ghost cursor）：
+  // 在其他标签页上显示主控页鼠标的位置与动作，方便平铺核对时
+  // 一眼看到主控窗口正在哪里操作。绿色箭头与真实鼠标（白色）
+  // 明显区分——哪个窗口没有绿鼠标，哪个就是主控窗口。
+  // 绿鼠标不会产生任何事件（pointer-events:none），不会造成回环。
+  // ---------------------------------------------------------------------------
+  let ghostOn = true;         // 由 Service Worker 下发的镜像开关
+  let ghostEl = null;
+  let ghostStyleEl = null;
+  let ghostTimer = 0;
+  let lastCursorSent = 0;
+
+  function ensureGhostStyle() {
+    if (ghostStyleEl) return;
+    ghostStyleEl = document.createElement('style');
+    ghostStyleEl.textContent = `
+      .mts-ghost-cursor { position: fixed; left: 0; top: 0; z-index: 2147483645;
+        pointer-events: none; opacity: 0; transition: opacity .25s; will-change: transform; }
+      .mts-ghost-cursor svg { display: block; filter: drop-shadow(0 2px 3px rgba(0,0,0,.45));
+        transition: transform .08s; }
+      .mts-ghost-cursor.pressed svg { transform: scale(.78); }
+      @keyframes mts-ghost-ripple { from { transform: scale(.3); opacity: .85; }
+        to { transform: scale(2.6); opacity: 0; } }
+      .mts-ghost-ripple { position: fixed; z-index: 2147483644; pointer-events: none;
+        width: 34px; height: 34px; margin: -17px 0 0 -4px; border-radius: 50%;
+        background: rgba(34, 197, 94, .35); border: 2px solid #16a34a;
+        animation: mts-ghost-ripple .45s ease-out forwards; }`;
+    document.documentElement.appendChild(ghostStyleEl);
+  }
+
+  function ensureGhost() {
+    if (ghostEl) return ghostEl;
+    ensureGhostStyle();
+    ghostEl = document.createElement('div');
+    ghostEl.className = 'mts-ghost-cursor';
+    // 箭头与系统白色鼠标形状一致，但填充亮绿色便于一眼区分
+    ghostEl.innerHTML = `<svg width="26" height="26" viewBox="0 0 24 24">
+      <path d="M5.5 2.2 L5.5 20.5 c0 .5.55.72.87.38 l4.4-4.7 a.5.5 0 0 1 .38-.17 l4.9.15
+               c.4 0 .6-.5.33-.8 L6.9 2.05 a.5.5 0 0 0-.9.15 z"
+        fill="#22c55e" stroke="#0f5132" stroke-width="1.2" stroke-linejoin="round"/>
+    </svg>`;
+    document.documentElement.appendChild(ghostEl);
+    return ghostEl;
+  }
+
+  function showGhost(vx, vy, pressed, click) {
+    const el = ensureGhost();
+    const x = Math.max(0, Math.min((vx ?? 0) * innerWidth, innerWidth - 1));
+    const y = Math.max(0, Math.min((vy ?? 0) * innerHeight, innerHeight - 1));
+    el.style.transform = `translate(${x}px, ${y}px)`;
+    el.style.opacity = '1';
+    el.classList.toggle('pressed', !!pressed);
+    if (click) {
+      const ripple = document.createElement('div');
+      ripple.className = 'mts-ghost-ripple';
+      ripple.style.left = x + 'px';
+      ripple.style.top = y + 'px';
+      document.documentElement.appendChild(ripple);
+      setTimeout(() => ripple.remove(), 500);
+    }
+    clearTimeout(ghostTimer);
+    ghostTimer = setTimeout(() => { if (ghostEl) ghostEl.style.opacity = '0'; }, 1500);
+  }
+
+  function removeGhost() {
+    clearTimeout(ghostTimer);
+    if (ghostEl) { ghostEl.remove(); ghostEl = null; }
+    if (ghostStyleEl) { ghostStyleEl.remove(); ghostStyleEl = null; }
+  }
+
+  // 捕获真实鼠标移动（节流 ~25次/秒）；镜像元素本身不产生事件，无回环
+  function onMouseMove(e) {
+    if (!e.isTrusted) return;
+    if (pickerActive) return;
+    const now = performance.now();
+    if (now - lastCursorSent < 40) return;
+    lastCursorSent = now;
+    send({
+      kind: 'cursor',
+      vx: e.clientX / innerWidth,
+      vy: e.clientY / innerHeight,
+      pressed: e.buttons === 1,
+    });
+  }
+
+  function replayCursor(ev) {
+    if (!ghostOn) return;
+    showGhost(ev.vx, ev.vy, ev.pressed, false);
+  }
+
+  // ---------------------------------------------------------------------------
   // 字段隔离（不同步的字段名单，如各标签页互不相同的编号）
   // ---------------------------------------------------------------------------
   const excluded = new Set(); // key 形如 'name:xxx' / 'id:xxx'
@@ -389,6 +480,8 @@
 
   function replayClick(ev) {
     const el = resolveTarget(ev);
+    // 点击时镜像鼠标同步闪烁（即便元素定位失败，仍显示点击位置反馈）
+    if (ghostOn) showGhost(ev.vx, ev.vy, false, true);
     if (!el) return;
     const { x, y } = pointFor(el, ev);
     const m = ev.mods || {};
@@ -474,6 +567,7 @@
     key: replayKey,
     input: replayInput,
     change: replayChange,
+    cursor: replayCursor,
   };
 
   // 精确模式用：计算目标元素在顶层视口中的坐标
@@ -650,6 +744,11 @@
           excluded.add(f.key);
           fieldLabels[f.key] = f.label || f.key;
         }
+        const wantGhost = !!msg.ghost;
+        if (wantGhost !== ghostOn) {
+          ghostOn = wantGhost;
+          if (!ghostOn) removeGhost(); // 关闭镜像鼠标时立即移除已显示的绿鼠标
+        }
         if (FRAME_KEY === 'top') sendResponse(true);
         return;
       }
@@ -666,6 +765,7 @@
 
   function teardown() {
     setPicker(false);
+    removeGhost();
     ac.abort();
     if (scrollRaf) cancelAnimationFrame(scrollRaf);
     try { chrome.runtime.onMessage.removeListener(onMessage); } catch { /* 上下文已失效 */ }
@@ -675,6 +775,7 @@
   const capture = { capture: true, signal };
   document.addEventListener('scroll', onScroll, { capture: true, passive: true, signal });
   document.addEventListener('click', onClick, capture);
+  document.addEventListener('mousemove', onMouseMove, { capture: true, passive: true, signal });
   document.addEventListener('focusin', onFocusIn, capture);
   document.addEventListener('keydown', onKey, capture);
   document.addEventListener('keyup', onKey, capture);

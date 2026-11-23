@@ -5,7 +5,7 @@ const DEFAULT_STATE = {
   enabled: false,
   seq: 0,
   tabIds: [],
-  opts: { scroll: true, click: true, keys: true, nav: true, scrollMode: 'absolute', precision: false, excluded: [] },
+  opts: { scroll: true, click: true, keys: true, nav: true, scrollMode: 'absolute', precision: false, ghost: true, excluded: [] },
 };
 
 const RESTRICTED = /^(chrome|edge|about|chrome-extension|se|devtools|view-source|chrome-search):|^https:\/\/(chromewebstore\.google\.com|chrome\.google\.com\/webstore)/;
