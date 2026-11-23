@@ -264,6 +264,11 @@ function cdpModifiers(m = {}) {
 const EDIT_COMMANDS = { a: 'selectAll', c: 'copy', x: 'cut', v: 'paste', z: 'undo', y: 'redo' };
 
 async function preciseClick(tabId, ev) {
+  // 双击回退合成回放：CDP 键盘命令在转发链路中存在悬挂风险（会卡住回放
+  // 队列），且转发后双击时序窗口不稳定；合成回放已含 dblclick + F2 兜底
+  //（进入编辑态的主通道），对接受合成事件的页面稳定可靠。拒收合成事件
+  // 的极端页面可在主控页按 F2（走可靠的 CDP 真实键通道同步）。
+  if ((ev.detail || 1) >= 2) return false;
   const pt = await chrome.tabs.sendMessage(tabId, { type: 'mts:locate', event: ev }, { frameId: 0 }).catch(() => null);
   // 隐藏的标签页不会渲染 -> CDP 命中测试会过期，退回普通回放
   if (!pt || !pt.visible) return false;
@@ -271,9 +276,11 @@ async function preciseClick(tabId, ev) {
     await attachDebugger(tabId);
     const base = { x: pt.x, y: pt.y, modifiers: cdpModifiers(ev.mods) };
     const clickCount = ev.detail || 1;
+    const press = (cnt) => cdp(tabId, 'Input.dispatchMouseEvent', { ...base, type: 'mousePressed', button: 'left', buttons: 1, clickCount: cnt });
+    const release = (cnt) => cdp(tabId, 'Input.dispatchMouseEvent', { ...base, type: 'mouseReleased', button: 'left', buttons: 0, clickCount: cnt });
     await cdp(tabId, 'Input.dispatchMouseEvent', { ...base, type: 'mouseMoved' });
-    await cdp(tabId, 'Input.dispatchMouseEvent', { ...base, type: 'mousePressed', button: 'left', buttons: 1, clickCount });
-    await cdp(tabId, 'Input.dispatchMouseEvent', { ...base, type: 'mouseReleased', button: 'left', buttons: 0, clickCount });
+    await press(clickCount);
+    await release(clickCount);
     return true;
   } catch {
     return false;
@@ -324,7 +331,7 @@ async function handleEvent(ev, sender) {
   if (!s.opts[CATEGORY[ev.kind]]) return;
 
   if (ev.kind === 'cursor') {
-    // 鼠标位置镜像只有主控页有效：点击/滚动/键盘才会接管主控，
+    // 鼠标位置镜像只有主控页有效：点击/滚动/键盘输入才会接管主控，
     // 纯悬停划过其他窗口不广播，避免绿鼠标在平铺窗口间乱闪（v1.6）
     if (src !== leaderTabId) return;
   } else {
@@ -357,7 +364,20 @@ function enqueue(tabId, job) {
   queues.set(tabId, next);
 }
 
+// 精确模式抑制窗口的发送去重（每标签页 300ms 内只发一次）
+const quietSent = new Map();
+
 async function replayInto(tabId, ev, precise) {
+  if (precise) {
+    // CDP 回放的事件 isTrusted=true，目标页内容脚本会把它当成真实用户输入
+    // 再次广播（回环 + 回声劫持主控 + isQuiet 误伤后续真实双击——两击间隔
+    // 小于回环静默窗口）。回放前先通知目标页进入短暂抑制窗口，从源头断回环
+    const last = quietSent.get(tabId) || 0;
+    if (Date.now() - last > 300) {
+      quietSent.set(tabId, Date.now());
+      await chrome.tabs.sendMessage(tabId, { type: 'mts:quiet', ms: 400 }).catch(() => {});
+    }
+  }
   // 输入法上屏的增量文本：精确模式用 CDP Input.insertText（真实输入通道，
   // 对拒收合成事件的自绘编辑器也 100% 有效）；编辑器未聚焦时静默失败
   // 回退普通回放

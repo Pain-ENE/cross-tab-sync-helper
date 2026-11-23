@@ -268,6 +268,7 @@
   function onMouseMove(e) {
     if (!e.isTrusted) return;
     if (pickerActive) return;
+    if (performance.now() < suppressUntil) return;
     if (!leaderSelf && !dragAnchor) return;
     const vx = e.clientX / innerWidth;
     const vy = e.clientY / innerHeight;
@@ -428,6 +429,7 @@
   function onClick(e) {
     if (!e.isTrusted || e.button !== 0) return;
     if (pickerActive) return;
+    if (performance.now() < suppressUntil) return;
     // 拖选结束后的补发 click 不是点击语义，不再广播（拖选已由
     // dragstart/dragend 序列完整同步），避免目标页多出一次单击
     if (dragEndAt && performance.now() - dragEndAt < 350) { dragEndAt = 0; return; }
@@ -460,6 +462,7 @@
 
   function onFocusIn(e) {
     if (!e.isTrusted) return;
+    if (performance.now() < suppressUntil) return;
     const el = eventTarget(e);
     if (!(el instanceof Element)) return;
     if (isExcluded(el)) return;
@@ -478,9 +481,13 @@
   let dragAnchor = null;   // {vx, vy} 左键按下起点
   let dragging = false;    // 拖选会话进行中
   let dragEndAt = 0;       // 拖选结束时间（用于吞掉紧随的 click 广播）
+  let suppressUntil = 0;   // 精确模式抑制窗口：CDP 回放事件 isTrusted=true，
+                          // 会被当成真实输入再次广播（回环 + 劫持主控 +
+                          // isQuiet 误伤后续真实双击），窗口内不广播任何捕获事件
 
   function onPointerDown(e) {
     if (!e.isTrusted || pickerActive) return;
+    if (performance.now() < suppressUntil) return;
     if (e.button !== 0) return;
     dragAnchor = { vx: e.clientX / innerWidth, vy: e.clientY / innerHeight };
     dragging = false;
@@ -489,6 +496,7 @@
 
   function onPointerUp(e) {
     if (!e.isTrusted || pickerActive) return;
+    if (performance.now() < suppressUntil) return;
     if (e.button !== 0) return;
     const vx = e.clientX / innerWidth;
     const vy = e.clientY / innerHeight;
@@ -503,6 +511,7 @@
 
   function onContextMenu(e) {
     if (!e.isTrusted || pickerActive) return;
+    if (performance.now() < suppressUntil) return;
     send({ kind: 'contextmenu', vx: e.clientX / innerWidth, vy: e.clientY / innerHeight });
   }
 
@@ -511,6 +520,7 @@
   // ---------------------------------------------------------------------------
   function onKey(e) {
     if (!e.isTrusted || e.isComposing) return;
+    if (performance.now() < suppressUntil) return;
     const el = eventTarget(e);
     if (isSensitive(el)) return;
     if (el instanceof Element && isExcluded(el)) return;
@@ -529,6 +539,7 @@
 
   function onInput(e) {
     if (!e.isTrusted) return;
+    if (performance.now() < suppressUntil) return;
     const el = eventTarget(e);
     if (isSensitive(el)) return;
     if (isExcluded(el)) return;
@@ -559,6 +570,7 @@
 
   function onChange(e) {
     if (!e.isTrusted) return;
+    if (performance.now() < suppressUntil) return;
     const el = eventTarget(e);
     if (isSensitive(el)) return;
     if (!(el instanceof HTMLInputElement || el instanceof HTMLSelectElement || el instanceof HTMLTextAreaElement)) return;
@@ -626,7 +638,17 @@
     el.dispatchEvent(new PointerEvent('pointerup', { ...base, ...ptr, buttons: 0 }));
     el.dispatchEvent(new MouseEvent('mouseup', { ...base, buttons: 0 }));
     el.dispatchEvent(new MouseEvent('click', { ...base, buttons: 0 }));
-    if (ev.detail === 2) el.dispatchEvent(new MouseEvent('dblclick', { ...base, buttons: 0 }));
+    if (ev.detail === 2) {
+      // dblclick 派发给坐标处最顶层元素：自绘应用的监听层常与点击目标不同层
+      const top = document.elementFromPoint(x, y) || el;
+      top.dispatchEvent(new MouseEvent('dblclick', { ...base, buttons: 0 }));
+      // 双击进入编辑态的兜底：严格检查事件可信度的自绘表格（腾讯文档等）
+      // 不认合成 dblclick，但兼容 Excel 式 F2 进入编辑；F2 在普通页面无默认行为
+      document.body.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'F2', code: 'F2', keyCode: 113, which: 113,
+        bubbles: true, cancelable: true, composed: true, view: window,
+      }));
+    }
   }
 
   function replayFocus(ev) {
@@ -738,6 +760,11 @@
       fireDown(2);
       fireUp(2);
       el.dispatchEvent(new MouseEvent('dblclick', mk(2, 0)));
+      // 与 replayClick 一致：严格自绘表格不认合成 dblclick，补 F2 进入编辑态
+      document.body.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'F2', code: 'F2', keyCode: 113, which: 113,
+        bubbles: true, cancelable: true, composed: true, view: window,
+      }));
     }
   }
 
@@ -998,6 +1025,11 @@
         // Service Worker 下发主控身份（点击/滚动/键盘接管时触发）
         leaderSelf = !!msg.on;
         if (FRAME_KEY === 'top') setLeaderRing(leaderSelf);
+        return;
+      case 'mts:quiet':
+        // 精确模式回放前的抑制窗口：CDP 输入 isTrusted=true，避免被再次广播
+        suppressUntil = performance.now() + (msg.ms || 400);
+        if (FRAME_KEY === 'top') sendResponse(true);
         return;
       case 'mts:teardown':
         teardown();
