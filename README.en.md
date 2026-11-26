@@ -12,6 +12,12 @@ Perform an action in one tab and let the other tabs in the group follow. Designe
 - **Colors.** Customize the interface accent and the mirrored cursor independently in the sync settings. Use the color picker or enter a HEX value. The default is muted seafoam.
 - **Precision mode.** When regular replay does not trigger a control, try the browser debugging interface. Compatibility depends on the page.
 
+## Mirrored cursor and dropdowns
+
+The mirrored cursor stays at its last position in follower tabs, including while you use a dropdown. Native dropdowns replay the committed selection. The behavior of custom dropdowns depends on the website.
+
+Tencent Docs Sheets date cells replay the full year, month and day. Each follower checks the date shown in the formula bar for the same cell. The popup flags cases that cannot be verified.
+
 ## Clipboard
 
 Enable sync and put the caret at the intended edit position. Right-click and select **同步粘贴** (Paste to all) or **分行粘贴** (Paste by line). When the site replaces the browser context menu, use the equivalent buttons in the extension popup. For Tencent Docs, start with an active formula-bar editor. Each tab uses its own current edit position.

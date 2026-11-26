@@ -155,7 +155,6 @@
   let leaderSelf = false;     // 本页是否为当前主控（决定是否广播鼠标位置）
   let ghostEl = null;
   let ghostStyleEl = null;
-  let ghostTimer = 0;
   let lastCursorSent = 0;
 
   function applyGhostColor(el) {
@@ -213,6 +212,7 @@
   }
 
   function showGhost(vx, vy, pressed, click) {
+    if (!syncEnabled || !ghostOn || leaderSelf) return;
     const el = ensureGhost();
     const x = Math.max(0, Math.min((vx ?? 0) * innerWidth, innerWidth - 1));
     const y = Math.max(0, Math.min((vy ?? 0) * innerHeight, innerHeight - 1));
@@ -228,14 +228,9 @@
       document.documentElement.appendChild(ripple);
       setTimeout(() => ripple.remove(), 500);
     }
-    clearTimeout(ghostTimer);
-    // 按住（左键未松开）时常显不淡出：长按不动也能看到绿鼠标的按住状态，
-    // 直到 press(on:false) 到达后再启动淡出
-    if (!pressed) ghostTimer = setTimeout(() => { if (ghostEl) ghostEl.style.opacity = '0'; }, 1500);
   }
 
   function removeGhost() {
-    clearTimeout(ghostTimer);
     if (ghostEl) { ghostEl.remove(); ghostEl = null; }
     if (ghostStyleEl) { ghostStyleEl.remove(); ghostStyleEl = null; }
   }
@@ -491,15 +486,48 @@
   // ---------------------------------------------------------------------------
   let lastClick = { el: null, t: 0 };
 
+  const SHEET_DATE_CELL = '.dui-datepicker .dui-calendar-date-panel td[title]';
+  const SHEET_DATE_ICON = '.date-time-cell-icon-date-pc.date-time-cell-icon-active';
+  const SHEET_FORMULA_BAR = '#alloy-simple-text-editor';
+  const SHEET_ADDRESS = 'input.bar-label';
+
+  function isTencentSheet() {
+    return location.hostname === 'docs.qq.com' && location.pathname.startsWith('/sheet/');
+  }
+
+  function dateKey(text) {
+    const match = /^(\d{4})(?:年|[./-])(\d{1,2})(?:月|[./-])(\d{1,2})日?$/.exec(text?.trim() || '');
+    return match ? match.slice(1).map(Number).join('/') : null;
+  }
+
+  function sheetAddress() {
+    const value = document.querySelector(SHEET_ADDRESS)?.value.trim().toUpperCase();
+    return /^[A-Z]+[1-9]\d*$/.test(value || '') ? value : null;
+  }
+
+  function captureSheetDate(target) {
+    if (!isTencentSheet()) return false;
+    const day = target.closest(SHEET_DATE_CELL);
+    if (!day) return false;
+    const selectedDate = dateKey(day.title);
+    const cell = sheetAddress();
+    if (selectedDate && cell && !isExcluded(day) && !isExcluded(target)) {
+      send({ kind: 'sheet-date', date: selectedDate, cell });
+    }
+    // Never replay a date tile by its row/column index in a different calendar.
+    return true;
+  }
+
   function onClick(e) {
     if (replaying || precisionToken !== null) return;
     if (!e.isTrusted || e.button !== 0) return;
     if (pickerActive) return;
+    const target = eventTarget(e);
+    if (!(target instanceof Element) || captureSheetDate(target)) return;
     // 拖选结束后的补发 click 不是点击语义，不再广播（拖选已由
     // dragstart/dragend 序列完整同步），避免目标页多出一次单击
     if (dragEndAt && performance.now() - dragEndAt < 350) { dragEndAt = 0; return; }
-    const el = eventTarget(e);
-    if (!(el instanceof Element)) return;
+    const el = target.closest('select') || target;
 
     // 点击 <label> 会产生第二次作用于关联控件的点击，
     // 目标页由 label 点击自行触发 -> 跳过
@@ -555,10 +583,15 @@
     if (replaying || precisionToken !== null) return;
     if (!e.isTrusted || pickerActive) return;
     if (e.button !== 0) return;
-    pasteGrid = gridSurface(eventTarget(e));
-    dragAnchor = { vx: e.clientX / innerWidth, vy: e.clientY / innerHeight };
+    const target = eventTarget(e);
+    pasteGrid = gridSurface(target);
+    const point = { vx: e.clientX / innerWidth, vy: e.clientY / innerHeight };
+    const select = target instanceof Element ? target.closest('select') : null;
+    // A native dropdown can take over before the document receives pointerup.
+    const popup = select && !select.multiple && select.size <= 1;
+    dragAnchor = popup ? null : point;
     dragging = false;
-    send({ kind: 'press', vx: dragAnchor.vx, vy: dragAnchor.vy, on: true });
+    send({ kind: 'press', ...point, on: !popup });
   }
 
   function onPointerUp(e) {
@@ -595,7 +628,7 @@
   let sheetImeTimer = 0;
 
   function isTencentSheetEditor(host) {
-    return location.hostname === 'docs.qq.com' && location.pathname.startsWith('/sheet/') &&
+    return isTencentSheet() &&
       ['alloy-simple-text-editor', 'alloy-rich-text-editor'].includes(host?.id);
   }
 
@@ -654,6 +687,7 @@
       repeat: e.repeat,
       mods: mods(e),
       editable: !!host,
+      nativeSelect: host instanceof HTMLSelectElement,
       sel: host ? selectorFor(host) : null,
     });
   }
@@ -685,6 +719,7 @@
     const target = eventTarget(e);
     const host = editingHost(target);
     if (!host || isExcluded(target) || isExcluded(host) || isSensitive(host)) return;
+    if (host instanceof HTMLSelectElement) return; // The change event carries the committed selection.
     if (e.isComposing) {
       if (isTencentSheetEditor(host) && e.inputType === 'insertCompositionText') {
         clearSheetIme();
@@ -741,6 +776,11 @@
     if (el instanceof HTMLInputElement && el.type === 'file') return;
     if (isExcluded(el)) return;
     if (isStaleFieldEvent(el, el.value)) return; // 注入前的旧输入，不广播
+    if (el instanceof HTMLSelectElement) {
+      const selection = Array.from(el.selectedOptions, (option) => ({ index: option.index, value: option.value }));
+      send({ kind: 'change', sel: selectorFor(el), selection });
+      return;
+    }
     send({ kind: 'change', sel: selectorFor(el), value: el.value, checked: el.checked, inputType: el.type });
   }
 
@@ -1017,10 +1057,36 @@
     }
   }
 
+  function replaySelect(select, selection) {
+    if (!Array.isArray(selection) || select.matches(':disabled') ||
+        (!select.multiple && selection.length > 1)) return 'missing-target';
+
+    const options = Array.from(select.options);
+    const chosen = new Set();
+    for (const { index, value } of selection) {
+      const available = (option) => option.value === value && !option.matches(':disabled') && !chosen.has(option);
+      const match = options[index] && available(options[index]) ? options[index]
+        : options.filter(available);
+      const option = Array.isArray(match) ? (match.length === 1 ? match[0] : null) : match;
+      if (!option) return 'missing-target';
+      chosen.add(option);
+    }
+    if (select.multiple) {
+      for (const option of options) option.selected = chosen.has(option);
+    } else {
+      select.selectedIndex = chosen.size ? chosen.values().next().value.index : -1;
+    }
+    select.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    return 'applied';
+  }
+
   function replayChange(ev) {
     const el = resolveSelector(ev.sel);
     if (!el) return 'missing-target';
     if (isSensitive(el) || isExcluded(el)) return 'isolated';
+    if (Array.isArray(ev.selection)) return el instanceof HTMLSelectElement
+      ? replaySelect(el, ev.selection) : 'missing-target';
     if (el instanceof HTMLInputElement && (el.type === 'checkbox' || el.type === 'radio')) {
       // 点击会像原始操作一样触发 input+change；点击回放已恢复状态时跳过
       if (el.checked !== ev.checked) el.click();
@@ -1147,7 +1213,61 @@
     return preventDefault ? 'handled' : 'applied';
   }
 
+  function visibleSheetControl(el) {
+    return el instanceof HTMLElement && el.getClientRects().length > 0 &&
+      getComputedStyle(el).visibility === 'visible';
+  }
+
+  function shownSheetDate() {
+    return dateKey(document.querySelector(SHEET_FORMULA_BAR)?.textContent);
+  }
+
+  async function replaySheetDate(ev) {
+    if (!isTencentSheet()) return 'missing-target';
+    let opened = false;
+    for (const delay of [0, 30, 65, 110, 120]) {
+      if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+      if (signal.aborted || !syncEnabled || Date.now() >= ev.deadline) return 'expired';
+      if (sheetAddress() !== ev.cell) continue;
+      const day = [...document.querySelectorAll(SHEET_DATE_CELL)].filter((tile) =>
+        visibleSheetControl(tile) && dateKey(tile.title) === ev.date);
+      if (day.length === 1) {
+        const button = day[0].querySelector('.dui-calendar-date');
+        if (!visibleSheetControl(button) || button.getAttribute('aria-disabled') === 'true') return 'missing-target';
+        if (isExcluded(button) || isExcluded(day[0])) return 'isolated';
+        // Click the exact day once. Focusing the surrounding popup can close it before click.
+        const bounds = button.getBoundingClientRect();
+        withoutCapture(() => button.click());
+        if (ghostOn) {
+          if (bounds.width && bounds.height) {
+            showGhost((bounds.left + bounds.width / 2) / innerWidth,
+              (bounds.top + bounds.height / 2) / innerHeight, false, true);
+          }
+        }
+        for (const verifyDelay of [0, 35, 85, 130]) {
+          if (verifyDelay) await new Promise((resolve) => setTimeout(resolve, verifyDelay));
+          if (signal.aborted || !syncEnabled || Date.now() >= ev.deadline) return 'expired';
+          if (sheetAddress() === ev.cell && shownSheetDate() === ev.date) return 'applied';
+        }
+        return 'date-unconfirmed';
+      }
+      if (![...document.querySelectorAll('.dui-datepicker')].some(visibleSheetControl)) {
+        if (shownSheetDate() === ev.date) return 'applied';
+        if (opened) continue;
+        const icon = document.querySelector(SHEET_DATE_ICON);
+        if (!visibleSheetControl(icon)) continue;
+        if (isExcluded(icon)) return 'isolated';
+        if (delay > 0) {
+          opened = true;
+          withoutCapture(() => icon.click());
+        }
+      }
+    }
+    return 'missing-target';
+  }
+
   const REPLAY = {
+    'sheet-date': replaySheetDate,
     paste: replayPaste,
     scroll: replayScroll,
     wheel: replayWheel,
@@ -1345,6 +1465,12 @@
     try { return run(); } finally { replaying = false; }
   }
 
+  function updateLeaderDisplay(on) {
+    leaderSelf = !!on;
+    if (leaderSelf) removeGhost();
+    if (FRAME_KEY === 'top') setLeaderRing(leaderSelf);
+  }
+
   function onMessage(msg, _sender, sendResponse) {
     switch (msg?.type) {
       case 'mts:replay': {
@@ -1406,8 +1532,7 @@
         }
         return;
       case 'mts:leader':
-        leaderSelf = !!msg.on;
-        if (FRAME_KEY === 'top') setLeaderRing(leaderSelf);
+        updateLeaderDisplay(msg.on);
         return;
       case 'mts:quiet': {
         clearTimeout(precisionTimer);
@@ -1446,10 +1571,8 @@
           ghostOn = wantGhost;
           if (!ghostOn) removeGhost(); // 关闭镜像鼠标时立即移除已显示的绿鼠标
         }
-        if (msg.leader !== undefined) {
-          leaderSelf = !!msg.leader;
-          if (FRAME_KEY === 'top') setLeaderRing(leaderSelf);
-        }
+        if (!syncEnabled) removeGhost();
+        if (msg.leader !== undefined) updateLeaderDisplay(msg.leader);
         if (FRAME_KEY === 'top') sendResponse(true);
         return;
       }

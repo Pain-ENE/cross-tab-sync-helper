@@ -10,6 +10,7 @@ const failureLabels = {
   disconnected: '连接中断',
   'missing-frame': '未找到页面框架',
   'missing-target': '未找到控件',
+  'date-unconfirmed': '日期未确认',
   expired: '操作已过期',
   timeout: '回放超时',
   busy: '待处理操作过多',

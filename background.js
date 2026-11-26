@@ -23,7 +23,7 @@ const DEFAULT_STATE = {
   },
 };
 
-const CATEGORY = { scroll: 'scroll', wheel: 'scroll', click: 'click', focus: 'click', key: 'keys', input: 'keys', change: 'keys', cursor: 'ghost', press: 'ghost', dragstart: 'click', dragmove: 'click', dragend: 'click', contextmenu: 'click' };
+const CATEGORY = { scroll: 'scroll', wheel: 'scroll', click: 'click', 'sheet-date': 'click', focus: 'click', key: 'keys', input: 'keys', change: 'keys', cursor: 'ghost', press: 'ghost', dragstart: 'click', dragmove: 'click', dragend: 'click', contextmenu: 'click' };
 
 // 在某标签页回放事件后的一小段时间内忽略来自该页的事件，
 // 防止回放引发的滚动、聚焦、输入等再次被广播出去（回环）。
@@ -516,7 +516,9 @@ async function replayInto(tabId, item) {
     if (ev.kind === 'click' || (ev.kind === 'key' && ev.key === 'Enter')) {
       lastReplay.set(tabId, Date.now());
     }
-    if (item.precise && (ev.kind === 'key' || (ev.kind === 'click' && ev.detail < 2) ||
+    // Native selects replay their committed value instead of opening a browser picker.
+    if (item.precise && ((ev.kind === 'key' && !ev.nativeSelect) ||
+        (ev.kind === 'click' && ev.detail < 2 && ev.targetTag !== 'select') ||
         (ev.kind === 'input' && ev.ins) || (ev.kind === 'wheel' && ev.deltaMode === 0))) {
       const status = await preciseReplay(tabId, route, item);
       if (status) return status;
