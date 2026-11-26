@@ -14,7 +14,7 @@ Perform an action in one tab and let the other tabs in the group follow. Designe
 
 ## Installation
 
-1. Download `cross-tab-sync-helper-v1.8.4.zip` from **Assets** on the release page, then extract it.
+1. Download `cross-tab-sync-helper-v1.8.6.zip` from **Assets** on the release page, then extract it.
 2. Open `edge://extensions` in Edge or `chrome://extensions` in Chrome. Enable Developer mode.
 3. Choose **Load unpacked** and select the `cross-tab-sync-helper` folder containing `manifest.json`.
 4. To update an existing unpacked installation, extract the new files into the same directory, then click **Reload** on the extensions page.
@@ -34,7 +34,9 @@ The popup's tile button uses the current display's available area. Windows belon
 
 Open two or more test pages, add them to a group, then enable sync. Take turns using each page and check both the results and the status in the popup. If a target is frozen, loading, or missing a matching control, check that page before continuing. Review important forms individually before submitting.
 
-Version 1.8.4 passed simulated browser API tests for four-window ordering, lead-window focus, recovery after a freeze, and individual replay failures. Desktop occlusion still needs verification on the target machine.
+Version 1.8.6 passed simulated browser API tests for four-window ordering, lead-window focus, recovery after a freeze, and individual replay failures. Desktop occlusion still needs verification on the target machine.
+
+In Edge, the formula bar was verified across four Tencent Docs test copies. Both “你好” entered using the system Pinyin IME and the number `7356` were saved in all four sheets after pressing Enter and reselecting the cells.
 
 ## Attribution and license
 

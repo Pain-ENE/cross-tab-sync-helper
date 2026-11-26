@@ -37,7 +37,8 @@ async function send(type, values = {}) {
 
 async function update(values) {
   try {
-    await send('mts:update', values);
+    const updated = await send('mts:update', values);
+    applyWorkerState(updated);
     await refreshDiagnostics();
   } catch {
     feedback('设置更新失败，请重试。', true);
@@ -194,11 +195,23 @@ function renderState() {
   renderTabs();
 }
 
+function applyWorkerState(next) {
+  if (next && (next.revision || 0) >= (state.revision || 0) && JSON.stringify(next) !== JSON.stringify(state)) {
+    state = next;
+    renderState();
+  }
+}
+
+let diagnosticsPending = false;
 async function refreshDiagnostics() {
+  if (diagnosticsPending) return;
+  diagnosticsPending = true;
   try {
     diagnostics = await send('mts:diagnostics') || {};
+    applyWorkerState(diagnostics.state);
     renderDiagnostics();
   } catch { /* 扩展页面关闭时无需继续刷新。 */ }
+  finally { diagnosticsPending = false; }
 }
 
 async function runCheck() {

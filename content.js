@@ -134,6 +134,11 @@
       el instanceof HTMLSelectElement || (el instanceof HTMLElement && el.isContentEditable);
   }
 
+  function editingHost(el) {
+    if (!isEditable(el)) return null;
+    return el.isContentEditable ? el.closest('[contenteditable]:not([contenteditable="false"])') || el : el;
+  }
+
   // ---------------------------------------------------------------------------
   // 镜像鼠标（ghost cursor，Apple 风格）：
   // 在其他标签页上显示主控页鼠标的位置与动作，方便平铺核对时
@@ -395,6 +400,45 @@
   const lastApplied = new Map(); // key -> {x, y, t} 最近回放过的位置
   const pendingScroll = new Set();
   let scrollRaf = 0;
+  let scrollVersion = 0;
+  let wheelBatch = null;
+  let wheelTimer = 0;
+  let wheelReplayAt = -Infinity;
+  let realWheelAt = -Infinity;
+
+  function flushWheel() {
+    clearTimeout(wheelTimer);
+    wheelTimer = 0;
+    const batch = wheelBatch;
+    wheelBatch = null;
+    // 普通页面已经发送滚动位置。Canvas 等自绘区域没有滚动事件时才发送滚轮。
+    if (batch && batch.scrollVersion === scrollVersion) send(batch.event);
+  }
+
+  function onWheel(e) {
+    if (!syncEnabled || replaying || precisionToken !== null || pickerActive || !e.isTrusted) return;
+    if (e.ctrlKey || e.metaKey || (!e.deltaX && !e.deltaY)) return;
+    const target = eventTarget(e);
+    if (!(target instanceof Element) || isExcluded(target)) return;
+    realWheelAt = performance.now();
+    const modesMatch = wheelBatch && wheelBatch.target === target && wheelBatch.event.deltaMode === e.deltaMode &&
+      wheelBatch.event.mods.shift === e.shiftKey && wheelBatch.event.mods.alt === e.altKey;
+    if (modesMatch && wheelBatch.scrollVersion === scrollVersion) {
+      wheelBatch.event.deltaX += e.deltaX;
+      wheelBatch.event.deltaY += e.deltaY;
+      return;
+    }
+    if (wheelBatch) flushWheel();
+    const r = target.getBoundingClientRect();
+    wheelBatch = { target, scrollVersion, event: {
+      kind: 'wheel', sel: selectorFor(target), targetTag: target.localName,
+      vx: e.clientX / innerWidth, vy: e.clientY / innerHeight,
+      ox: r.width ? (e.clientX - r.left) / r.width : .5,
+      oy: r.height ? (e.clientY - r.top) / r.height : .5,
+      deltaX: e.deltaX, deltaY: e.deltaY, deltaMode: e.deltaMode, mods: mods(e),
+    } };
+    wheelTimer = setTimeout(flushWheel, 45);
+  }
 
   function scrollMetrics(target) {
     if (target === null) {
@@ -433,9 +477,11 @@
 
   function onScroll(e) {
     if (replaying || precisionToken !== null) return;
+    if (wheelReplayAt > realWheelAt && performance.now() - wheelReplayAt < 200) return;
     const t = e.target;
     const target = (t === document || t === document.documentElement || t === document.scrollingElement || t === document.body && document.scrollingElement === document.body) ? null : t;
     if (target !== null && target.nodeType !== Node.ELEMENT_NODE) return;
+    scrollVersion++;
     pendingScroll.add(target);
     if (!scrollRaf) scrollRaf = requestAnimationFrame(flushScroll);
   }
@@ -538,12 +584,47 @@
   // ---------------------------------------------------------------------------
   // 捕获：键盘 / 输入
   // ---------------------------------------------------------------------------
+  let composing = null;
+  let lastImeCommit = null;
+  let sheetIme = null;
+  let sheetImeTimer = 0;
+
+  function isTencentSheetEditor(host) {
+    return location.hostname === 'docs.qq.com' && location.pathname.startsWith('/sheet/') &&
+      ['alloy-simple-text-editor', 'alloy-rich-text-editor'].includes(host?.id);
+  }
+
+  function clearSheetIme() {
+    clearTimeout(sheetImeTimer);
+    sheetIme = null;
+  }
+
+  function flushSheetIme() {
+    const pending = sheetIme;
+    clearSheetIme();
+    if (!pending || !syncEnabled || !pending.host.isConnected ||
+        pending.host.textContent !== pending.value || isExcluded(pending.host)) return;
+    lastImeCommit = { host: pending.host, text: pending.text, at: performance.now(), snapshot: pending.value };
+    send({ kind: 'input', sel: selectorFor(pending.host), editorText: pending.value });
+  }
+
+  function canCaptureInput(e) {
+    return syncEnabled && !replaying && precisionToken === null && !pickerActive && e.isTrusted;
+  }
+
   function onKey(e) {
-    if (replaying || precisionToken !== null) return;
-    if (!e.isTrusted || e.isComposing) return;
+    if (!canCaptureInput(e) || e.isComposing || e.keyCode === 229 || e.key === 'Process') return;
     const el = eventTarget(e);
-    if (isSensitive(el)) return;
-    if (el instanceof Element && isExcluded(el)) return;
+    const host = editingHost(el);
+    // A composing flag can outlive an editor replaced by the spreadsheet.
+    // Real non-composing keys must still be sent.
+    if (composing && composing !== host) composing = null;
+    if (e.type === 'keydown') {
+      if (sheetIme && e.key === 'Escape') clearSheetIme();
+      else if (sheetIme) flushSheetIme();
+      else lastImeCommit = null;
+    }
+    if (isSensitive(el) || isExcluded(el) || (host && isExcluded(host))) return;
     send({
       kind: 'key',
       type: e.type,
@@ -553,40 +634,83 @@
       location: e.location,
       repeat: e.repeat,
       mods: mods(e),
-      editable: isEditable(el),
-      sel: el instanceof Element && isEditable(el) ? selectorFor(el) : null,
+      editable: !!host,
+      sel: host ? selectorFor(host) : null,
     });
   }
 
-  function onInput(e) {
-    if (replaying || precisionToken !== null) return;
+  function onCompositionStart(e) {
+    if (!canCaptureInput(e)) return;
+    if (sheetIme) flushSheetIme();
+    composing = editingHost(eventTarget(e));
+    lastImeCommit = null;
+  }
+
+  function onCompositionEnd(e) {
     if (!e.isTrusted) return;
-    const el = eventTarget(e);
-    if (isSensitive(el)) return;
-    if (isExcluded(el)) return;
-    const sel = selectorFor(el);
-    if (!sel) return;
-    if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) {
-      if (el instanceof HTMLInputElement && (el.type === 'checkbox' || el.type === 'radio' || el.type === 'file')) return;
-      if (isStaleFieldEvent(el, el.value)) return; // 注入前的旧输入，不广播
-      send({ kind: 'input', sel, value: el.value });
-    } else if (el instanceof HTMLElement && el.isContentEditable) {
-      // 自绘/受控编辑器（腾讯文档、React 富文本等）：
-      // - IME 组合中间态不广播（isComposing），确认上屏后的 input 再广播，避免重复插入
-      // - 除 html 外附带本次插入的增量文本 ins（e.data）与编辑器坐标——
-      //   目标页直接改 DOM + 合成 input 会被这类编辑器拒收，必须走 execCommand 原生编辑流
-      if (e.isComposing) return;
-      const host = el.closest('[contenteditable]:not([contenteditable="false"])') || el;
+    const host = composing || editingHost(eventTarget(e));
+    composing = null;
+    if (!canCaptureInput(e) || !host || !e.data || isExcluded(eventTarget(e))) {
+      clearSheetIme();
+      return;
+    }
+    if (lastImeCommit?.host === host && lastImeCommit.snapshot === host.textContent) return;
+    clearSheetIme();
+    if (sendEditorInput(host, e.data, true)) {
+      lastImeCommit = { host, text: e.data, value: host.value, at: performance.now() };
+    }
+  }
+
+  function onInput(e) {
+    if (!canCaptureInput(e)) return;
+    const target = eventTarget(e);
+    const host = editingHost(target);
+    if (!host || isExcluded(target) || isExcluded(host) || isSensitive(host)) return;
+    if (e.isComposing) {
+      if (isTencentSheetEditor(host) && e.inputType === 'insertCompositionText') {
+        clearSheetIme();
+        // Edge/Tencent Sheets can leave the selected Han text marked as composing.
+        // Carry the resulting editor value so a later commit cannot append it twice.
+        if (typeof e.data === 'string' && /[\u3400-\u9fff]/.test(e.data)) {
+          sheetIme = { host, text: e.data, value: host.textContent };
+          sheetImeTimer = setTimeout(flushSheetIme, 45);
+        }
+      }
+      return;
+    }
+    if (sheetIme?.host === host && sheetIme.value === host.textContent) flushSheetIme();
+    if (composing === host && e.inputType === 'insertCompositionText') return;
+    composing = null;
+    const commit = lastImeCommit;
+    lastImeCommit = null;
+    // 部分浏览器会在 compositionend 后补发同一次上屏的 input。
+    if (commit?.host === host && performance.now() - commit.at < 100 &&
+        (e.data === commit.text || e.inputType === 'insertFromComposition' ||
+          (e.inputType === 'insertCompositionText' && host.value === commit.value))) {
+      // Native controls can finalize their value after compositionend.
+      if (commit.value !== undefined && host.value !== commit.value) sendEditorInput(host, null);
+      return;
+    }
+    sendEditorInput(host, e.data ?? null, false, e.inputType);
+  }
+
+  function sendEditorInput(host, inserted, ime = false, inputType = 'insertText') {
+    if (isSensitive(host) || isExcluded(host)) return false;
+    const sel = selectorFor(host);
+    if (!sel) return false;
+    if (host instanceof HTMLInputElement || host instanceof HTMLTextAreaElement || host instanceof HTMLSelectElement) {
+      if (host instanceof HTMLInputElement && ['checkbox', 'radio', 'file'].includes(host.type)) return false;
+      if (isStaleFieldEvent(host, host.value)) return false;
+      send({ kind: 'input', sel, value: host.value, ins: ime ? inserted : null, data: inserted, inputType });
+    } else {
       const r = host.getBoundingClientRect();
       send({
-        kind: 'input',
-        sel: selectorFor(host),
-        html: host.innerHTML,
-        ins: e.data ?? null,
-        vx: r.width || r.height ? (r.left + r.width / 2) / innerWidth : null,
+        kind: 'input', sel, html: host.innerHTML, ins: inserted, data: inserted, inputType,
+        vx: r.width ? (r.left + r.width / 2) / innerWidth : null,
         vy: r.height ? (r.top + r.height / 2) / innerHeight : null,
       });
     }
+    return true;
   }
 
   function onChange(e) {
@@ -642,6 +766,20 @@
     lastApplied.set(ev.sel || '', { x: after.x, y: after.y, t: performance.now() });
   }
 
+  function replayWheel(ev) {
+    const target = resolveTarget(ev);
+    if (!target) return 'missing-target';
+    if (isExcluded(target)) return 'isolated';
+    const {x, y} = pointFor(target, ev);
+    const m = ev.mods || {};
+    wheelReplayAt = performance.now();
+    target.dispatchEvent(new WheelEvent('wheel', {
+      bubbles: true, cancelable: true, composed: true, view: window,
+      clientX: x, clientY: y, deltaX: ev.deltaX, deltaY: ev.deltaY,
+      deltaMode: ev.deltaMode, shiftKey: !!m.shift, altKey: !!m.alt,
+    }));
+  }
+
   const FOCUSABLE = 'input,textarea,select,button,a[href],area[href],summary,[tabindex],[contenteditable]:not([contenteditable="false"])';
 
   function replayClick(ev) {
@@ -686,9 +824,19 @@
     if (typeof el.focus === 'function' && deepActiveElement() !== el) el.focus({ preventScroll: true });
   }
 
+  function keyboardTarget(ev, restoreFocus = false) {
+    const active = deepActiveElement();
+    if (!ev.sel) return active || document.body;
+    const matched = resolveSelector(ev.sel);
+    if (!matched) return null;
+    if (active === matched || editingHost(active) === matched) return active;
+    if (restoreFocus && editingHost(matched) === matched && focusEditor(matched)) return deepActiveElement();
+    return null;
+  }
+
   function replayKey(ev) {
-    const target = deepActiveElement() || document.body;
-    if (!target || (ev.sel && resolveSelector(ev.sel) !== target)) return 'missing-target';
+    const target = keyboardTarget(ev, ev.type === 'keydown');
+    if (!target) return 'missing-target';
     if (isSensitive(target) || isExcluded(target)) return 'isolated';
     const m = ev.mods || {};
     const kev = new KeyboardEvent(ev.type, {
@@ -715,12 +863,25 @@
   }
 
   function replayInput(ev) {
+    if (typeof ev.editorText === 'string') {
+      const host = resolveSelector(ev.sel);
+      if (!isTencentSheetEditor(host)) return 'missing-target';
+      if (isExcluded(host)) return 'isolated';
+      if (host.textContent === ev.editorText) return 'applied';
+      if (!prepareEditor(host)) return 'missing-target';
+      const selection = document.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(host);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      return insertTextInto(host, ev.editorText) ? 'applied' : 'missing-target';
+    }
     // 增量文本（输入法上屏/编辑命令）优先走 execCommand：直接改 DOM + 合成 input
     // 会被自绘/受控编辑器拒收，execCommand 产生浏览器原生编辑流（带 inputType），
     // 应用模型照常更新；目标页还没打开编辑器时，在相同位置回放双击让应用
     // 打开编辑器后重试插入（自绘表格的编辑器是惰性创建的）。
-    if (ev.ins) {
-      const findHost = () => resolveSelector(ev.sel) || (ev.vx != null && findEditableAt(ev.vx, ev.vy));
+    if (ev.ins && ev.html != null) {
+      const findHost = () => editingHost(resolveSelector(ev.sel)) || (ev.vx != null && findEditableAt(ev.vx, ev.vy));
       const insert = (host) => {
         if (isSensitive(host) || isExcluded(host)) return 'isolated';
         return insertTextInto(host, ev.ins) ? 'applied' : 'missing-target';
@@ -728,16 +889,17 @@
       const host = findHost();
       if (host) return insert(host);
       if (ev.vx != null) {
-        const atPoint = elementAtViewportRatio(ev.vx, ev.vy);
-        if (atPoint && isExcluded(atPoint)) return 'isolated';
-        synthClickAt(ev.vx, ev.vy, 2);
-        // 回执要等编辑器真正就绪，后续 Enter 才能按顺序回放。
+        // Give a previously replayed click time to mount its editor before reopening it.
         return (async () => {
-          for (const delay of [0, 50, 100]) {
+          for (const delay of [25, 55, 100]) {
             await new Promise((resolve) => setTimeout(resolve, delay));
             if (signal.aborted || Date.now() > ev.deadline) return 'expired';
             const editor = findHost();
             if (editor) return withoutCapture(() => insert(editor));
+            if (delay !== 55) continue;
+            const atPoint = elementAtViewportRatio(ev.vx, ev.vy);
+            if (atPoint && isExcluded(atPoint)) return 'isolated';
+            if (atPoint) withoutCapture(() => synthClickAt(ev.vx, ev.vy, 2));
           }
           return 'missing-target';
         })();
@@ -753,7 +915,9 @@
       if (el.value === ev.value) return;
       setNativeValue(el, ev.value);
     }
-    el.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true }));
+    el.dispatchEvent(new InputEvent('input', {
+      bubbles: true, composed: true, data: ev.data ?? null, inputType: ev.inputType || 'insertText',
+    }));
   }
 
   // 视口比例坐标下找到可编辑元素（自上而下找 contenteditable 祖先）
@@ -766,10 +930,34 @@
     return null;
   }
 
+  function focusEditor(host) {
+    if (isSensitive(host) || isExcluded(host) || host.readOnly || host.disabled) return false;
+    const active = deepActiveElement();
+    if (editingHost(active) === host) return true;
+    const bounds = host.getBoundingClientRect();
+    if (!bounds.width || !bounds.height || bounds.right <= 0 || bounds.bottom <= 0 ||
+        bounds.left >= innerWidth || bounds.top >= innerHeight ||
+        getComputedStyle(host).visibility !== 'visible') return false;
+    host.focus({ preventScroll: true });
+    return editingHost(deepActiveElement()) === host;
+  }
+
+  function prepareEditor(host) {
+    if (!focusEditor(host)) return false;
+    if (!host.isContentEditable) return true;
+    const selection = host.getRootNode().getSelection?.() ?? document.getSelection();
+    if (!selection) return false;
+    if (host.contains(selection.anchorNode) && host.contains(selection.focusNode)) return true;
+    const caret = document.createRange();
+    caret.selectNodeContents(host);
+    caret.collapse(false);
+    selection.removeAllRanges();
+    selection.addRange(caret);
+    return true;
+  }
+
   function insertTextInto(host, text) {
-    if (host && typeof host.focus === 'function' && deepActiveElement() !== host) {
-      host.focus({ preventScroll: true });
-    }
+    if (!prepareEditor(host)) return false;
     try { return document.execCommand('insertText', false, text); } catch { return false; }
   }
 
@@ -886,6 +1074,7 @@
 
   const REPLAY = {
     scroll: replayScroll,
+    wheel: replayWheel,
     click: replayClick,
     focus: replayFocus,
     key: replayKey,
@@ -1073,14 +1262,19 @@
         if (FRAME_KEY === 'top') sendResponse(withoutCapture(() => locate(msg.event)));
         return;
       case 'mts:precision-target': {
-        const target = deepActiveElement();
         const ev = msg.event;
-        sendResponse(document.visibilityState === 'visible' && !!target &&
-          !isSensitive(target) && !isExcluded(target) &&
-          (ev.kind !== 'input' || target.isContentEditable || target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) &&
-          (!ev.sel || resolveSelector(ev.sel) === target) &&
-          !(ev.kind === 'key' && ev.key === 'Enter' && target.form &&
-            [...target.form.elements].some((el) => ['submit', 'image'].includes(el.type) && isExcluded(el))));
+        const ready = withoutCapture(() => {
+          if (document.visibilityState !== 'visible') return false;
+          const target = keyboardTarget(ev, ev.kind === 'input' || ev.type === 'keydown');
+          if (!target || isSensitive(target) || isExcluded(target)) return false;
+          if (ev.kind === 'input') {
+            const host = editingHost(target);
+            return !!host && prepareEditor(host);
+          }
+          return !(ev.key === 'Enter' && target.form &&
+            [...target.form.elements].some((el) => ['submit', 'image'].includes(el.type) && isExcluded(el)));
+        });
+        sendResponse(ready);
         return;
       }
       case 'mts:ping':
@@ -1099,6 +1293,7 @@
       case 'mts:quiet': {
         clearTimeout(precisionTimer);
         precisionToken = msg.token;
+        if (msg.wheel) wheelReplayAt = performance.now();
         precisionTimer = setTimeout(() => { precisionToken = null; }, msg.ms);
         if (FRAME_KEY === 'top') sendResponse(true);
         return;
@@ -1156,6 +1351,8 @@
     removeLeaderRing();
     ac.abort();
     clearTimeout(precisionTimer);
+    clearTimeout(wheelTimer);
+    clearSheetIme();
     if (scrollRaf) cancelAnimationFrame(scrollRaf);
     try { chrome.runtime.onMessage.removeListener(onMessage); } catch { /* 上下文已失效 */ }
     delete window.__archiveSyncHelper;
@@ -1163,15 +1360,18 @@
 
   const capture = { capture: true, signal };
   document.addEventListener('scroll', onScroll, { capture: true, passive: true, signal });
+  document.addEventListener('wheel', onWheel, { ...capture, passive: true });
   document.addEventListener('click', onClick, capture);
   document.addEventListener('mousemove', onMouseMove, { capture: true, passive: true, signal });
   document.addEventListener('pointerdown', onPointerDown, capture);
   document.addEventListener('pointerup', onPointerUp, capture);
   document.addEventListener('contextmenu', onContextMenu, capture);
   document.addEventListener('focusin', onFocusIn, capture);
-  document.addEventListener('keydown', onKey, capture);
-  document.addEventListener('keyup', onKey, capture);
-  document.addEventListener('input', onInput, capture);
+  window.addEventListener('keydown', onKey, capture);
+  window.addEventListener('keyup', onKey, capture);
+  window.addEventListener('compositionstart', onCompositionStart, capture);
+  window.addEventListener('compositionend', onCompositionEnd, capture);
+  window.addEventListener('input', onInput, capture);
   document.addEventListener('change', onChange, capture);
   chrome.runtime.onMessage.addListener(onMessage);
 

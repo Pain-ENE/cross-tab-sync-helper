@@ -6,6 +6,7 @@ importScripts('cursor-colors.js');
 const cursorColors = globalThis.mtsCursorColors;
 
 const DEFAULT_STATE = {
+  revision: 0,
   enabled: false,
   tabIds: [],
   opts: {
@@ -22,7 +23,7 @@ const DEFAULT_STATE = {
   },
 };
 
-const CATEGORY = { scroll: 'scroll', click: 'click', focus: 'click', key: 'keys', input: 'keys', change: 'keys', cursor: 'ghost', press: 'ghost', dragstart: 'click', dragmove: 'click', dragend: 'click', contextmenu: 'click' };
+const CATEGORY = { scroll: 'scroll', wheel: 'scroll', click: 'click', focus: 'click', key: 'keys', input: 'keys', change: 'keys', cursor: 'ghost', press: 'ghost', dragstart: 'click', dragmove: 'click', dragend: 'click', contextmenu: 'click' };
 
 // 在某标签页回放事件后的一小段时间内忽略来自该页的事件，
 // 防止回放引发的滚动、聚焦、输入等再次被广播出去（回环）。
@@ -85,14 +86,16 @@ function updateState(mutate, opts = {}) {
       scheduleReceipts();
     }
     const normalized = normalize(next);
+    normalized.revision = (prev.revision || 0) + 1;
     if (prev.opts.ghostColor !== normalized.opts.ghostColor || prev.opts.themeColor !== normalized.opts.themeColor) {
       await chrome.storage.local.set({
         ghostColor: normalized.opts.ghostColor,
         themeColor: normalized.opts.themeColor,
       });
     }
+    await chrome.storage.session.set({ state: normalized });
     state = normalized;
-    await chrome.storage.session.set({ state });
+    updateBadge(state);
     await reconcile(prev, state, opts.announce !== false);
     return state;
   });
@@ -159,8 +162,6 @@ async function reconcile(prev, next, announce = true) {
       || !!prev.opts.ghost !== !!next.opts.ghost || prev.opts.ghostColor !== next.opts.ghostColor) {
     await broadcastConfig(next);
   }
-
-  updateBadge(next);
 
   if (turningOn && announce) {
     // 等新勾选的页面全部注入完成后再广播开启提示
@@ -519,7 +520,7 @@ async function replayInto(tabId, item) {
       lastReplay.set(tabId, Date.now());
     }
     if (item.precise && (ev.kind === 'key' || (ev.kind === 'click' && ev.detail < 2) ||
-        (ev.kind === 'input' && ev.ins))) {
+        (ev.kind === 'input' && ev.ins) || (ev.kind === 'wheel' && ev.deltaMode === 0))) {
       const status = await preciseReplay(tabId, route, item);
       if (status) return status;
       if (!canReplay(tabId, item)) return 'expired';
@@ -540,7 +541,7 @@ async function preciseReplay(tabId, route, item) {
       !ev.mods?.ctrl && !ev.mods?.meta && !ev.mods?.alt) return null;
   let point;
   try {
-    if (ev.kind === 'click') {
+    if (ev.kind === 'click' || ev.kind === 'wheel') {
       point = await toFrame(tabId, route, { type: 'mts:locate', event: ev });
       if (!point?.visible) return null;
     } else if (!(await toFrame(tabId, route, { type: 'mts:precision-target', event: ev }))) {
@@ -551,11 +552,16 @@ async function preciseReplay(tabId, route, item) {
   } catch { return null; }
   const token = item.sequence;
   try {
-    await toFrame(tabId, route, { type: 'mts:quiet', token, ms: DELIVERY_MS + 200 });
+    await toFrame(tabId, route, { type: 'mts:quiet', token, ms: DELIVERY_MS + 200, wheel: ev.kind === 'wheel' });
     if (!canReplay(tabId, item) || Date.now() - item.queuedAt > MAX_EVENT_AGE) return 'expired';
     if (ev.kind === 'click') await deadline(preciseClick(tabId, ev, point));
     else if (ev.kind === 'key') await deadline(preciseKey(tabId, ev));
-    else await deadline(cdp(tabId, 'Input.insertText', { text: ev.ins }));
+    else if (ev.kind === 'wheel') {
+      await deadline(cdp(tabId, 'Input.dispatchMouseEvent', {
+        type: 'mouseWheel', x: point.x, y: point.y, deltaX: ev.deltaX,
+        deltaY: ev.deltaY, modifiers: cdpModifiers(ev.mods),
+      }));
+    } else await deadline(cdp(tabId, 'Input.insertText', { text: ev.ins }));
     return 'applied';
   } catch (error) {
     return error.message === 'timeout' ? 'timeout' : 'failed';
@@ -773,6 +779,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return;
     case 'mts:diagnostics':
       getState().then(() => sendResponse({
+        state,
         leader: state.enabled ? leaderTabId : null,
         ready: [...routes.keys()],
         availability: Object.fromEntries(availability),
