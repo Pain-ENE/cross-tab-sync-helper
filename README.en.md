@@ -12,9 +12,18 @@ Perform an action in one tab and let the other tabs in the group follow. Designe
 - **Colors.** Customize the interface accent and the mirrored cursor independently in the sync settings. Use the color picker or enter a HEX value. The default is muted seafoam.
 - **Precision mode.** When regular replay does not trigger a control, try the browser debugging interface. Compatibility depends on the page.
 
+## Clipboard
+
+Enable sync and put the caret at the intended edit position. Right-click and select **同步粘贴** (Paste to all) or **分行粘贴** (Paste by line). When the site replaces the browser context menu, use the equivalent buttons in the extension popup. For Tencent Docs, start with an active formula-bar editor. Each tab uses its own current edit position.
+
+- Paste to all sends the complete plain text to each tab. Paste by line assigns one line to each tab in sync-group list order. Both actions support up to 9 tabs. Extra lines are ignored, blank lines keep their position, and tabs without an assigned line are skipped.
+- Each tab shows up to 30 characters, with an ellipsis for longer text. The extension clears the clipboard after a page accepts the paste. It preserves the content if every paste fails and protects text copied while a paste is in progress.
+- On a synced page, press **Alt+Shift+V** to paste to all, **Alt+Shift+L** to paste by line, or **Alt+Shift+X** to clear manually. Both paste shortcuts clear the clipboard after a successful paste. Bind browser-wide clipboard shortcuts at `edge://extensions/shortcuts` or `chrome://extensions/shortcuts`.
+- Clipboard permissions allow the extension to read and clear the current clipboard. The extension does not store a clipboard history or upload clipboard data. OS clipboard history is managed by the system.
+
 ## Installation
 
-1. Download `cross-tab-sync-helper-v1.8.6.zip` from **Assets** on the release page, then extract it.
+1. Extract the offline installation ZIP for the desired version.
 2. Open `edge://extensions` in Edge or `chrome://extensions` in Chrome. Enable Developer mode.
 3. Choose **Load unpacked** and select the `cross-tab-sync-helper` folder containing `manifest.json`.
 4. To update an existing unpacked installation, extract the new files into the same directory, then click **Reload** on the extensions page.
@@ -27,6 +36,9 @@ Perform an action in one tab and let the other tabs in the group follow. Designe
 | Disable sync | `Alt+.` |
 | Add or remove the active tab | `Alt+Shift+G` |
 | Tile within the current window area | `Alt+Shift+S` |
+| Paste to all and clear the clipboard on a synced page | `Alt+Shift+V` |
+| Paste by line and clear the clipboard on a synced page | `Alt+Shift+L` |
+| Clear the clipboard on a synced page | `Alt+Shift+X` |
 
 The popup's tile button uses the current display's available area. Windows belonging to apps configured as always on top may still cover the browser.
 
@@ -36,7 +48,7 @@ Open two or more test pages, add them to a group, then enable sync. Take turns u
 
 Version 1.8.6 passed simulated browser API tests for four-window ordering, lead-window focus, recovery after a freeze, and individual replay failures. Desktop occlusion still needs verification on the target machine.
 
-In Edge, the formula bar was verified across four Tencent Docs test copies. Both “你好” entered using the system Pinyin IME and the number `7356` were saved in all four sheets after pressing Enter and reselecting the cells.
+In v1.8.6, the formula bar was verified in Edge across four Tencent Docs test copies. Both “你好” entered using the system Pinyin IME and the number `7356` were saved in all four sheets after pressing Enter and reselecting the cells.
 
 ## Attribution and license
 

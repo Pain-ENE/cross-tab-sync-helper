@@ -21,6 +21,12 @@ let tabs = [];
 let checking = false;
 let busy = false;
 let initialized = false;
+let pasting = false;
+const pasteButtons = [...document.querySelectorAll('[data-paste]')];
+
+function updatePasteButtons() {
+  for (const button of pasteButtons) button.disabled = pasting || !state.enabled;
+}
 
 function feedback(message = '', error = false) {
   const el = $('#feedback');
@@ -191,6 +197,7 @@ function renderState() {
     if (document.activeElement !== hex) hex.value = color.toUpperCase();
     previewColor(option, color);
   }
+  updatePasteButtons();
   renderExcluded();
   renderTabs();
 }
@@ -272,6 +279,21 @@ for (const row of colorRows) {
     if (event.key === 'Escape') {
       commit(currentColor(option));
       event.stopPropagation();
+    }
+  });
+}
+for (const button of pasteButtons) {
+  button.addEventListener('click', async () => {
+    pasting = true;
+    updatePasteButtons();
+    try {
+      const result = await send('mts:paste-from-popup', { mode: button.dataset.paste });
+      if (result.clean) window.close();
+      else feedback(result.message, true);
+    } catch (error) { feedback(error.message || '粘贴失败。', true); }
+    finally {
+      pasting = false;
+      updatePasteButtons();
     }
   });
 }

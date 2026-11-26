@@ -2,7 +2,7 @@
 // 管理同步组、注入内容脚本、在标签页之间路由事件，
 // 并管理"字段隔离"名单与点选模式。
 
-importScripts('cursor-colors.js');
+importScripts('cursor-colors.js', 'clipboard-worker.js');
 const cursorColors = globalThis.mtsCursorColors;
 
 const DEFAULT_STATE = {
@@ -383,6 +383,7 @@ function invalidate(tabId, clearOutcome = false) {
   generations.set(tabId, generation(tabId) + 1);
   routes.delete(tabId);
   preparing.delete(tabId);
+  for (const item of queues.get(tabId) || []) item.finish?.('expired');
   queues.delete(tabId);
   if (clearOutcome && outcomes.delete(tabId)) scheduleReceipts();
 }
@@ -398,7 +399,8 @@ function deadline(promise, ms = DELIVERY_MS) {
 function canReplay(tabId, item) {
   return state.enabled && state.tabIds.includes(tabId) &&
     state.tabIds.includes(item.source) && generation(tabId) === item.generation &&
-    syncRun === item.run && !!state.opts[CATEGORY[item.event.kind]];
+    syncRun === item.run && (item.event.kind === 'paste'
+      ? generation(item.source) === item.sourceGeneration : !!state.opts[CATEGORY[item.event.kind]]);
 }
 
 function report(tabId, item, code) {
@@ -463,6 +465,7 @@ function enqueue(tabId, item) {
     if (index >= 0 && !isVisual(item.event)) queue.splice(index, 1);
     else {
       report(tabId, item, 'busy');
+      item.finish?.('busy');
       return;
     }
   }
@@ -472,23 +475,17 @@ function enqueue(tabId, item) {
 async function drain(tabId, queue) {
   while (queues.get(tabId) === queue && queue.length) {
     const item = queue.shift();
-    if (!canReplay(tabId, item)) continue;
-    const unavailable = availability.get(tabId);
-    if (unavailable) {
-      report(tabId, item, unavailable);
-      continue;
+    let status = !canReplay(tabId, item) || Date.now() - item.queuedAt > MAX_EVENT_AGE
+      ? 'expired' : availability.get(tabId);
+    if (!status) {
+      try {
+        status = await replayInto(tabId, item);
+      } catch (error) {
+        status = error.message === 'timeout' ? 'timeout' : 'disconnected';
+      }
     }
-    if (Date.now() - item.queuedAt > MAX_EVENT_AGE) {
-      report(tabId, item, 'expired');
-      continue;
-    }
-    let status;
-    try {
-      status = await replayInto(tabId, item);
-    } catch (error) {
-      status = error.message === 'timeout' ? 'timeout' : 'disconnected';
-    }
-    report(tabId, item, status);
+    report(tabId, item, status === 'handled' ? 'applied' : status);
+    item.finish?.(status);
   }
   if (queues.get(tabId) === queue) queues.delete(tabId);
 }
@@ -774,6 +771,20 @@ function setPicker(on) {
 // ---------------------------------------------------------------------------
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   switch (msg?.type) {
+    case 'mts:paste-from-popup':
+      if (sender.url !== chrome.runtime.getURL('popup.html')) return;
+      chrome.tabs.query({ active: true, currentWindow: true })
+        .then(([tab]) => requestPaste(msg.mode, tab))
+        .then(sendResponse, () => sendResponse({ error: '粘贴失败。' }));
+      return true;
+    case 'mts:paste-shortcut':
+      if (sender.tab?.id != null) {
+        void runPasteAction(msg.mode, sender.tab, { frameId: sender.frameId });
+      }
+      return;
+    case 'mts:clear-clipboard':
+      if (sender.tab?.id != null) void requestClipboardClear(sender.tab.id);
+      return;
     case 'mts:event':
       void handleEvent(msg.event, sender);
       return;
@@ -837,7 +848,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 chrome.commands.onCommand.addListener(async (command, tab) => {
-  if (command === 'sync-on' || command === 'sync-off') {
+  if (command === 'clear-clipboard') {
+    await requestClipboardClear(tab?.id);
+  } else if (command === 'paste-all' || command === 'paste-lines') {
+    const active = tab ?? (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0];
+    if (active) await runPasteAction(command === 'paste-all' ? 'all' : 'lines', active);
+  } else if (command === 'sync-on' || command === 'sync-off') {
     // Ctrl+1 开 / Ctrl+2 关；状态无变化时不重复提示
     const want = command === 'sync-on';
     const s = await getState();

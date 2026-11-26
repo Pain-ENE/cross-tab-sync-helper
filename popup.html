@@ -9,7 +9,7 @@
   <header class="header">
     <img src="icons/icon48.png" alt="" width="36" height="36">
     <h1>标签页同步</h1>
-    <span class="version">v1.8.6</span>
+    <span class="version">v1.8.8</span>
   </header>
   <main>
     <section class="card hero" aria-labelledby="sync-title">
@@ -56,6 +56,13 @@
         <button id="dupGo" type="button" class="button primary">复制</button>
       </div>
     </section>
+    <section aria-labelledby="clipboard-title">
+      <div class="section-head"><h2 id="clipboard-title">剪贴板</h2></div>
+      <div class="actions">
+        <button type="button" class="button secondary" data-paste="all" title="Alt+Shift+V" disabled>同步粘贴</button>
+        <button type="button" class="button secondary" data-paste="lines" title="Alt+Shift+L" disabled>分行粘贴</button>
+      </div>
+    </section>
     <p class="feedback" id="feedback" role="status" hidden></p>
 
     <section aria-labelledby="isolation-title">
@@ -94,6 +101,8 @@
       <div class="shortcuts">
         <span><kbd>Alt+,</kbd> 开启</span><span><kbd>Alt+.</kbd> 关闭</span>
         <span><kbd>Alt+Shift+G</kbd> 加入或移出</span><span><kbd>Alt+Shift+S</kbd> 平铺</span>
+        <span><kbd>Alt+Shift+V</kbd> 同步粘贴</span><span><kbd>Alt+Shift+L</kbd> 分行粘贴</span>
+        <span><kbd>Alt+Shift+X</kbd> 清空剪贴板（同步页）</span>
       </div>
     </details>
   </main>

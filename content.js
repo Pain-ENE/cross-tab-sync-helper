@@ -555,6 +555,7 @@
     if (replaying || precisionToken !== null) return;
     if (!e.isTrusted || pickerActive) return;
     if (e.button !== 0) return;
+    pasteGrid = gridSurface(eventTarget(e));
     dragAnchor = { vx: e.clientX / innerWidth, vy: e.clientY / innerHeight };
     dragging = false;
     send({ kind: 'press', vx: dragAnchor.vx, vy: dragAnchor.vy, on: true });
@@ -575,9 +576,13 @@
     send({ kind: 'press', vx, vy, on: false });
   }
 
+  let pasteContext;
+  let pasteGrid;
+
   function onContextMenu(e) {
     if (replaying || precisionToken !== null) return;
     if (!e.isTrusted || pickerActive) return;
+    pasteContext = eventTarget(e);
     send({ kind: 'contextmenu', vx: e.clientX / innerWidth, vy: e.clientY / innerHeight });
   }
 
@@ -612,7 +617,21 @@
     return syncEnabled && !replaying && precisionToken === null && !pickerActive && e.isTrusted;
   }
 
+  const clipboardShortcuts = new Map([['KeyV', 'all'], ['KeyL', 'lines'], ['KeyX', 'clear']]);
+
   function onKey(e) {
+    const clipboardAction = clipboardShortcuts.get(e.code);
+    if (clipboardAction && e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey &&
+        canCaptureInput(e) && !e.isComposing && e.keyCode !== 229 && e.key !== 'Process') {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (e.type === 'keydown' && !e.repeat) {
+        const message = clipboardAction === 'clear' ? { type: 'mts:clear-clipboard' }
+          : { type: 'mts:paste-shortcut', mode: clipboardAction };
+        chrome.runtime.sendMessage(message).catch(() => {});
+      }
+      return;
+    }
     if (!canCaptureInput(e) || e.isComposing || e.keyCode === 229 || e.key === 'Process') return;
     const el = eventTarget(e);
     const host = editingHost(el);
@@ -788,6 +807,7 @@
     if (ghostOn) showGhost(ev.vx, ev.vy, false, true);
     if (!el) return 'missing-target';
     if (isExcluded(el)) return 'isolated';
+    pasteGrid = gridSurface(el);
     const { x, y } = pointFor(el, ev);
     const m = ev.mods || {};
     const base = {
@@ -1072,7 +1092,63 @@
     synthMouseAt(ev.vx, ev.vy, 'menu', 2);
   }
 
+  function gridSurface(el) {
+    return el instanceof Element
+      ? el.closest('canvas, [role="grid"], [role="treegrid"]') : null;
+  }
+
+  function pasteTarget(fromMenu) {
+    const active = deepActiveElement();
+    if (active instanceof HTMLIFrameElement) return {};
+    const candidate = fromMenu && pasteContext?.isConnected ? pasteContext : active;
+    const host = editingHost(candidate);
+    if (host) {
+      if (isSensitive(host) || isExcluded(host) || isExcluded(candidate)) return { code: 'isolated' };
+      if (host.disabled || host.readOnly || host instanceof HTMLSelectElement ||
+          (host instanceof HTMLInputElement && !['text', 'search', 'tel', 'url', 'email', 'number'].includes(host.type))) return {};
+      return { host };
+    }
+    const grid = gridSurface(candidate) ||
+      (!fromMenu && (active === document.body || active === document.documentElement) ? pasteGrid : null);
+    if (!grid?.isConnected) return {};
+    return isExcluded(grid) ? { code: 'isolated' } : { grid };
+  }
+
+  function replayPaste(ev) {
+    if (!syncEnabled || pickerActive) return 'expired';
+    const { host, grid, code } = pasteTarget(ev.fromMenu);
+    if (!host && !grid) return code || 'missing-target';
+    if (host && (composing === host || sheetIme?.host === host)) return 'busy';
+    let expected;
+    const nativeField = host instanceof HTMLInputElement || host instanceof HTMLTextAreaElement;
+    if (nativeField) {
+      if (host instanceof HTMLInputElement && /[\r\n]/.test(ev.text)) return 'failed';
+      const start = host.selectionStart ?? host.value.length;
+      const end = host.selectionEnd ?? host.value.length;
+      const removed = end - start;
+      if (host.maxLength >= 0 && host.value.length - removed + ev.text.length > host.maxLength) return 'failed';
+      if (host.selectionStart != null) expected = host.value.slice(0, start) + ev.text + host.value.slice(end);
+    }
+    if (host && !prepareEditor(host)) return 'missing-target';
+
+    // Let web editors handle a plain-text paste first. Native fields fall back to browser editing.
+    const data = new DataTransfer();
+    data.setData('text/plain', ev.text);
+    const target = host || grid;
+    const preventDefault = !target.dispatchEvent(new ClipboardEvent('paste', {
+      clipboardData: data, bubbles: true, cancelable: true, composed: true,
+    }));
+    if (!preventDefault && (!host || !insertTextInto(host, ev.text))) return 'missing-target';
+    if (nativeField) {
+      // Blurring after a split paste must not rebroadcast the per-tab value.
+      staleField = { el: host, value: host.value };
+      if (!preventDefault && expected !== undefined && host.value !== expected) return 'failed';
+    }
+    return preventDefault ? 'handled' : 'applied';
+  }
+
   const REPLAY = {
+    paste: replayPaste,
     scroll: replayScroll,
     wheel: replayWheel,
     click: replayClick,
@@ -1101,6 +1177,38 @@
   // 用独立的 setTimeout 管理，不依赖 ac.signal —— 关闭同步拆除本脚本后，
   // 提示条仍能正常淡出。
   // ---------------------------------------------------------------------------
+  let clipboardToast;
+  let clipboardToastTimer;
+
+  function showClipboardToast(title, preview) {
+    clipboardToast?.remove();
+    clearTimeout(clipboardToastTimer);
+    clipboardToast = document.createElement('div');
+    Object.assign(clipboardToast.style, {
+      all: 'initial', position: 'fixed', right: '12px', bottom: '12px', zIndex: '2147483646',
+      width: 'max-content', maxWidth: 'calc(100% - 24px)', pointerEvents: 'none',
+    });
+    const shadow = clipboardToast.attachShadow({ mode: 'closed' });
+    const panel = document.createElement('div');
+    panel.setAttribute('role', 'status');
+    panel.style.cssText = 'padding:10px 14px;border:1px solid #b5d9d2;border-radius:14px;'
+      + 'background:#eef8f5;color:#174940;font:13px/1.45 system-ui,sans-serif;'
+      + 'box-shadow:0 4px 16px #163e3626;overflow-wrap:anywhere';
+    const heading = document.createElement('strong');
+    heading.textContent = title;
+    panel.append(heading);
+    if (preview !== undefined) {
+      const line = document.createElement('div');
+      line.style.whiteSpace = 'pre-wrap';
+      line.dir = 'auto';
+      line.textContent = preview;
+      panel.append(line);
+    }
+    shadow.append(panel);
+    document.documentElement.append(clipboardToast);
+    clipboardToastTimer = setTimeout(() => { clipboardToast?.remove(); clipboardToast = null; }, 4200);
+  }
+
   let toastEl = null;
   let toastTimer = 0;
 
@@ -1258,6 +1366,17 @@
         } catch { sendResponse('failed'); }
         return;
       }
+      case 'mts:paste-target': {
+        const target = pasteTarget(msg.fromMenu);
+        sendResponse(syncEnabled && !pickerActive && !!(target.host || target.grid));
+        return;
+      }
+      case 'mts:clipboard-toast':
+        if (FRAME_KEY === 'top') {
+          showClipboardToast(msg.title, msg.preview);
+          sendResponse(true);
+        }
+        return;
       case 'mts:locate':
         if (FRAME_KEY === 'top') sendResponse(withoutCapture(() => locate(msg.event)));
         return;
@@ -1352,6 +1471,8 @@
     ac.abort();
     clearTimeout(precisionTimer);
     clearTimeout(wheelTimer);
+    clearTimeout(clipboardToastTimer);
+    clipboardToast?.remove();
     clearSheetIme();
     if (scrollRaf) cancelAnimationFrame(scrollRaf);
     try { chrome.runtime.onMessage.removeListener(onMessage); } catch { /* 上下文已失效 */ }
