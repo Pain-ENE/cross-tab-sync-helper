@@ -16,7 +16,11 @@ Perform an action in one tab and let the other tabs in the group follow. Designe
 
 The mirrored cursor stays at its last position in follower tabs, including while you use a dropdown. Native dropdowns replay the committed selection. The behavior of custom dropdowns depends on the website.
 
-Tencent Docs Sheets date cells replay the full year, month and day. Each follower checks the date shown in the formula bar for the same cell. The popup flags cases that cannot be verified.
+Tencent Docs Sheets calendar buttons synchronize an explicit open/closed state. Date tiles and Today replay the full date and verify the same cell in the formula bar. Followers can align the displayed month, up to 24 months within the replay deadline. An unconfirmed date is never retried blindly.
+
+Keep Tencent Docs visible in separate tiled windows. Hidden or minimized documents may suspend rendering; calendar replay reports “页面在后台，请先平铺” instead of opening a delayed picker. Make the document visible and repeat the operation; expired actions are not resent.
+
+Mirrored pointer feedback now uses an independent, coalesced delivery lane. Pointer sampling and custom-grid wheel batching use 16ms intervals, down from 40ms and 45ms. Date confirmation observes DOM changes instead of polling. Popup timing includes capture-to-worker transport, queueing and replay/confirmation, but excludes display refresh and server persistence.
 
 ## Clipboard
 

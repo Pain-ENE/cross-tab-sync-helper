@@ -4,6 +4,7 @@ const colorRows = [...document.querySelectorAll('[data-color]')];
 let savedColors = {};
 const blockedURL = /^(chrome|edge|about|chrome-extension|se|devtools|view-source|chrome-search):|^https:\/\/(chromewebstore\.google\.com|chrome\.google\.com\/webstore)/i;
 const failureLabels = {
+  'background-tab': '页面在后台，请先平铺',
   frozen: '浏览器已冻结',
   discarded: '页面已休眠',
   loading: '正在载入',
@@ -135,9 +136,12 @@ function renderDiagnostics() {
       tone = 'leader';
     } else if (state.enabled && out) {
       tone = out.code === 'applied' ? 'good' : out.code === 'isolated' ? '' : 'warn';
-      label = out.code === 'applied' ? '回放 ' + out.latency + ' ms'
+      label = out.code === 'applied' ? (out.kind === 'sheet-date' ? '日期已确认 ' : '回放 ') + out.latency + ' ms'
         : out.code === 'isolated' ? '已按规则隔离' : failureLabels[out.code] || '回放失败';
       detail = label + ' · ' + new Date(out.at).toLocaleTimeString();
+      if (out.code === 'applied' && Number.isFinite(out.queueMs)) {
+        detail += ` · 传输 ${out.transportMs} / 排队 ${out.queueMs} / 执行与确认 ${out.applyMs} ms`;
+      }
     }
     if (out?.missed) {
       detail += (detail ? ' · ' : '') + '本轮有 ' + out.missed + ' 次未确认';

@@ -275,7 +275,7 @@
     if (leaderStyleEl) { leaderStyleEl.remove(); leaderStyleEl = null; }
   }
 
-  // 捕获真实鼠标移动（节流 ~25次/秒）；镜像元素本身不产生事件，无回环。
+  // 捕获真实鼠标移动（最多约60次/秒）；镜像元素本身不产生事件，无回环。
   // 只有主控页广播：悬停划过其他窗口不会引起绿鼠标跳动（v1.6）；
   // 按住中（拖选会话）放宽主控门控——按下本身就是接管信号（v1.6.2）。
   // 按下后位移超过阈值 → 进入拖选会话：先补发起点 mousedown，
@@ -296,7 +296,7 @@
       }
     }
     const now = performance.now();
-    if (now - lastCursorSent < 40) return;
+    if (now - lastCursorSent < 16) return;
     lastCursorSent = now;
     // 拖选会话中的移动走 dragmove 通道（受"鼠标点击"开关控制，与镜像
     // 开关无关），目标页逐点回放按住移动；非拖选时为普通 cursor
@@ -381,6 +381,7 @@
   function send(event) {
     if (!syncEnabled || replaying || precisionToken !== null) return;
     event.frame = FRAME_KEY;
+    event.sentAt = Date.now();
     try {
       chrome.runtime.sendMessage({ type: 'mts:event', event }).catch(() => {});
     } catch {
@@ -432,7 +433,7 @@
       oy: r.height ? (e.clientY - r.top) / r.height : .5,
       deltaX: e.deltaX, deltaY: e.deltaY, deltaMode: e.deltaMode, mods: mods(e),
     } };
-    wheelTimer = setTimeout(flushWheel, 45);
+    wheelTimer = setTimeout(flushWheel, 16);
   }
 
   function scrollMetrics(target) {
@@ -507,7 +508,7 @@
 
   function captureSheetDate(target) {
     if (!isTencentSheet()) return false;
-    const day = target.closest(SHEET_DATE_CELL);
+    const day = target.closest(SHEET_DATE_CELL) || target.closest('.dui-datepicker .dui-calendar-today-btn');
     if (!day) return false;
     const selectedDate = dateKey(day.title);
     const cell = sheetAddress();
@@ -518,12 +519,27 @@
     return true;
   }
 
+  function sheetCalendar() {
+    return [...document.querySelectorAll('.dui-datepicker')].find(visibleSheetControl);
+  }
+
+  function captureSheetCalendar(target) {
+    if (!isTencentSheet()) return false;
+    const icon = target.closest(SHEET_DATE_ICON);
+    if (!icon) return false;
+    const cell = sheetAddress();
+    if (cell && !isExcluded(icon) && !isExcluded(target)) {
+      send({ kind: 'sheet-calendar', cell, open: !sheetCalendar() });
+    }
+    return true;
+  }
+
   function onClick(e) {
     if (replaying || precisionToken !== null) return;
     if (!e.isTrusted || e.button !== 0) return;
     if (pickerActive) return;
     const target = eventTarget(e);
-    if (!(target instanceof Element) || captureSheetDate(target)) return;
+    if (!(target instanceof Element) || captureSheetDate(target) || captureSheetCalendar(target)) return;
     // 拖选结束后的补发 click 不是点击语义，不再广播（拖选已由
     // dragstart/dragend 序列完整同步），避免目标页多出一次单击
     if (dragEndAt && performance.now() - dragEndAt < 350) { dragEndAt = 0; return; }
@@ -1222,52 +1238,120 @@
     return dateKey(document.querySelector(SHEET_FORMULA_BAR)?.textContent);
   }
 
-  async function replaySheetDate(ev) {
-    if (!isTencentSheet()) return 'missing-target';
+  // Observe readiness and confirmation instead of polling with chained timers.
+  // Hidden tabs can throttle timers to seconds; DOM updates still wake observers.
+  const pendingSheetReplays = new Set();
+  function watchSheetReplay(ev, attempt, fallback) {
+    return new Promise((resolve) => {
+      let done = false;
+      let timer;
+      const finish = (status) => {
+        if (done) return;
+        done = true;
+        observer.disconnect();
+        clearTimeout(timer);
+        signal.removeEventListener('abort', cancel);
+        document.removeEventListener('visibilitychange', check);
+        pendingSheetReplays.delete(cancel);
+        resolve(status);
+      };
+      const cancel = () => finish('expired');
+      const check = () => {
+        if (done) return;
+        if (signal.aborted || !syncEnabled || Date.now() >= ev.deadline) return cancel();
+        if (document.visibilityState === 'hidden') return finish('background-tab');
+        try {
+          const status = attempt();
+          if (status) finish(status);
+        } catch { finish('failed'); }
+      };
+      const observer = new MutationObserver(check);
+      observer.observe(document.documentElement, {
+        childList: true, subtree: true, characterData: true,
+        attributes: true, attributeFilter: ['class', 'style', 'title', 'value', 'aria-disabled'],
+      });
+      pendingSheetReplays.add(cancel);
+      signal.addEventListener('abort', cancel, { once: true });
+      document.addEventListener('visibilitychange', check);
+      timer = setTimeout(() => finish(fallback()), Math.max(0, ev.deadline - Date.now() - 20));
+      check();
+    });
+  }
+
+  function replaySheetCalendar(ev) {
+    if (!isTencentSheet() || !/^[A-Z]+[1-9]\d*$/.test(ev.cell) || typeof ev.open !== 'boolean') return 'missing-target';
+    let clicked = false;
+    return watchSheetReplay(ev, () => {
+      if (sheetAddress() !== ev.cell) return null;
+      if (!!sheetCalendar() === ev.open) return 'applied';
+      if (clicked) return null;
+      const icons = [...document.querySelectorAll(SHEET_DATE_ICON)].filter(visibleSheetControl);
+      if (icons.length !== 1) return null;
+      if (isExcluded(icons[0])) return 'isolated';
+      // Set the desired state once; never focus the formula bar or toggle twice.
+      clicked = true;
+      withoutCapture(() => icons[0].click());
+      return !!sheetCalendar() === ev.open ? 'applied' : null;
+    }, () => 'missing-target');
+  }
+
+  function replaySheetDate(ev) {
+    if (!isTencentSheet() || !/^[A-Z]+[1-9]\d*$/.test(ev.cell) || dateKey(ev.date) !== ev.date) return 'missing-target';
     let opened = false;
-    for (const delay of [0, 30, 65, 110, 120]) {
-      if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
-      if (signal.aborted || !syncEnabled || Date.now() >= ev.deadline) return 'expired';
-      if (sheetAddress() !== ev.cell) continue;
-      const day = [...document.querySelectorAll(SHEET_DATE_CELL)].filter((tile) =>
+    let clicked = false;
+    const visitedMonths = new Set();
+    return watchSheetReplay(ev, () => {
+      if (sheetAddress() !== ev.cell) return null;
+      const calendar = sheetCalendar();
+      if (shownSheetDate() === ev.date && !calendar) return 'applied';
+      if (clicked) return null;
+      const days = [...document.querySelectorAll(SHEET_DATE_CELL)].filter((tile) =>
         visibleSheetControl(tile) && dateKey(tile.title) === ev.date);
-      if (day.length === 1) {
-        const button = day[0].querySelector('.dui-calendar-date');
-        if (!visibleSheetControl(button) || button.getAttribute('aria-disabled') === 'true') return 'missing-target';
-        if (isExcluded(button) || isExcluded(day[0])) return 'isolated';
-        // Click the exact day once. Focusing the surrounding popup can close it before click.
+      if (days.length > 1) return 'missing-target';
+      if (days.length === 1) {
+        const button = days[0].querySelector('.dui-calendar-date');
+        if (!visibleSheetControl(button) || button.getAttribute('aria-disabled') === 'true' ||
+            days[0].classList.contains('dui-calendar-disabled-cell')) return 'missing-target';
+        if (isExcluded(button) || isExcluded(days[0])) return 'isolated';
+        clicked = true;
         const bounds = button.getBoundingClientRect();
         withoutCapture(() => button.click());
-        if (ghostOn) {
-          if (bounds.width && bounds.height) {
-            showGhost((bounds.left + bounds.width / 2) / innerWidth,
-              (bounds.top + bounds.height / 2) / innerHeight, false, true);
-          }
+        if (ghostOn && bounds.width && bounds.height) {
+          showGhost((bounds.left + bounds.width / 2) / innerWidth,
+            (bounds.top + bounds.height / 2) / innerHeight, false, true);
         }
-        for (const verifyDelay of [0, 35, 85, 130]) {
-          if (verifyDelay) await new Promise((resolve) => setTimeout(resolve, verifyDelay));
-          if (signal.aborted || !syncEnabled || Date.now() >= ev.deadline) return 'expired';
-          if (sheetAddress() === ev.cell && shownSheetDate() === ev.date) return 'applied';
-        }
-        return 'date-unconfirmed';
+        return sheetAddress() === ev.cell && shownSheetDate() === ev.date && !sheetCalendar() ? 'applied' : null;
       }
-      if (![...document.querySelectorAll('.dui-datepicker')].some(visibleSheetControl)) {
-        if (shownSheetDate() === ev.date) return 'applied';
-        if (opened) continue;
-        const icon = document.querySelector(SHEET_DATE_ICON);
-        if (!visibleSheetControl(icon)) continue;
-        if (isExcluded(icon)) return 'isolated';
-        if (delay > 0) {
-          opened = true;
-          withoutCapture(() => icon.click());
-        }
+      if (calendar && days.length === 0) {
+        const year = Number(calendar.querySelector('.dui-datepicker-header-year .dui-select-text')?.textContent);
+        const month = Number(calendar.querySelector('.dui-datepicker-header-month .dui-select-text')?.textContent.replace('月', ''));
+        const [wantedYear, wantedMonth] = ev.date.split('/').map(Number);
+        if (!Number.isInteger(year) || year < 1 || !Number.isInteger(month) || month < 1 || month > 12) return 'missing-target';
+        const current = year * 12 + month;
+        const delta = wantedYear * 12 + wantedMonth - current;
+        // Bound navigation and wait for each real header update, never click twice at one month.
+        if (Math.abs(delta) > 24) return 'missing-target';
+        if (!delta || visitedMonths.has(current)) return null;
+        const arrow = calendar.querySelector(delta < 0 ? '.dui-datepicker-header-prev' : '.dui-datepicker-header-next');
+        if (!visibleSheetControl(arrow)) return 'missing-target';
+        if (isExcluded(arrow)) return 'isolated';
+        visitedMonths.add(current);
+        withoutCapture(() => arrow.click());
       }
-    }
-    return 'missing-target';
+      if (!calendar && !opened) {
+        const icons = [...document.querySelectorAll(SHEET_DATE_ICON)].filter(visibleSheetControl);
+        if (icons.length !== 1) return null;
+        if (isExcluded(icons[0])) return 'isolated';
+        opened = true;
+        withoutCapture(() => icons[0].click());
+      }
+      return null;
+    }, () => clicked ? 'date-unconfirmed' : 'missing-target');
   }
 
   const REPLAY = {
     'sheet-date': replaySheetDate,
+    'sheet-calendar': replaySheetCalendar,
     paste: replayPaste,
     scroll: replayScroll,
     wheel: replayWheel,
@@ -1471,6 +1555,8 @@
     if (FRAME_KEY === 'top') setLeaderRing(leaderSelf);
   }
 
+  let lastGhostSequence = 0;
+  let lastGhostEpoch = 0;
   function onMessage(msg, _sender, sendResponse) {
     switch (msg?.type) {
       case 'mts:replay': {
@@ -1481,6 +1567,17 @@
         if (Date.now() > msg.event.deadline) {
           sendResponse('expired');
           return;
+        }
+        if (Number.isFinite(msg.event.epoch) && msg.event.epoch > lastGhostEpoch) {
+          lastGhostEpoch = msg.event.epoch;
+          lastGhostSequence = 0;
+        }
+        if (Number.isFinite(msg.event.sequence)) {
+          if (['cursor', 'press'].includes(msg.event.kind) && (msg.event.epoch < lastGhostEpoch || msg.event.sequence < lastGhostSequence)) {
+            sendResponse('applied');
+            return;
+          }
+          lastGhostSequence = Math.max(lastGhostSequence, msg.event.sequence);
         }
         try {
           const result = withoutCapture(() => REPLAY[msg.event.kind](msg.event));
@@ -1555,6 +1652,7 @@
       case 'mts:config': {
         if (msg.enabled && !syncEnabled) snapshotFocusedField();
         syncEnabled = !!msg.enabled;
+        if (!syncEnabled) for (const cancel of pendingSheetReplays) cancel();
         excluded.clear();
         fieldLabels = {};
         for (const f of msg.excluded || []) {

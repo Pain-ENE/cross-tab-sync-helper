@@ -23,7 +23,7 @@ const DEFAULT_STATE = {
   },
 };
 
-const CATEGORY = { scroll: 'scroll', wheel: 'scroll', click: 'click', 'sheet-date': 'click', focus: 'click', key: 'keys', input: 'keys', change: 'keys', cursor: 'ghost', press: 'ghost', dragstart: 'click', dragmove: 'click', dragend: 'click', contextmenu: 'click' };
+const CATEGORY = { scroll: 'scroll', wheel: 'scroll', click: 'click', 'sheet-date': 'click', 'sheet-calendar': 'click', focus: 'click', key: 'keys', input: 'keys', change: 'keys', cursor: 'ghost', press: 'ghost', dragstart: 'click', dragmove: 'click', dragend: 'click', contextmenu: 'click' };
 
 // 在某标签页回放事件后的一小段时间内忽略来自该页的事件，
 // 防止回放引发的滚动、聚焦、输入等再次被广播出去（回环）。
@@ -32,6 +32,7 @@ const CDP_VERSION = '1.3';
 
 const lastReplay = new Map(); // tabId -> 最近一次回放完成时间
 const queues = new Map();     // 每个目标页独立有序队列
+const visualLanes = new Map(); // Cursor feedback must never delay a real action.
 const attachedTabs = new Set();
 let leaderTabId = null;
 let pickerOn = false;
@@ -365,6 +366,7 @@ const outcomes = new Map();
 const MAX_PENDING = 48;
 const DELIVERY_MS = 700;
 const MAX_EVENT_AGE = 1600;
+const deliveryEpoch = Date.now();
 let eventSequence = 0;
 let receiptTimer;
 function scheduleReceipts() {
@@ -385,6 +387,7 @@ function invalidate(tabId, clearOutcome = false) {
   preparing.delete(tabId);
   for (const item of queues.get(tabId) || []) item.finish?.('expired');
   queues.delete(tabId);
+  visualLanes.delete(tabId);
   if (clearOutcome && outcomes.delete(tabId)) scheduleReceipts();
 }
 
@@ -407,9 +410,12 @@ function report(tabId, item, code) {
   if (isVisual(item.event) || !canReplay(tabId, item)) return;
   const previous = outcomes.get(tabId);
   if (previous && previous.sequence > item.sequence) return;
-  const latency = Date.now() - item.queuedAt;
+  const latency = Date.now() - (item.capturedAt ?? item.queuedAt);
   outcomes.set(tabId, {
-    code, latency, sequence: item.sequence, at: Date.now(),
+    code, latency, sequence: item.sequence, at: Date.now(), kind: item.event.kind,
+    transportMs: item.queuedAt - (item.capturedAt ?? item.queuedAt),
+    queueMs: (item.startedAt ?? item.queuedAt) - item.queuedAt,
+    applyMs: Date.now() - (item.startedAt ?? item.queuedAt),
     missed: (previous?.missed || 0) + (code === 'applied' || code === 'isolated' ? 0 : 1),
   });
   scheduleReceipts();
@@ -434,13 +440,49 @@ async function handleEvent(ev, sender) {
     setLeader(src);
   }
   if (ev.kind === 'scroll') ev.mode = s.opts.scrollMode;
+  const queuedAt = Date.now();
+  const capturedAt = Number.isFinite(ev.sentAt) && ev.sentAt <= queuedAt && ev.sentAt >= queuedAt - MAX_EVENT_AGE
+    ? ev.sentAt : queuedAt;
   const item = {
     event: ev, source: src, precise: s.opts.precision && sender.frameId === 0,
-    queuedAt: Date.now(), sequence: ++eventSequence, run: syncRun,
+    queuedAt, capturedAt, sequence: ++eventSequence, run: syncRun,
   };
   for (const tabId of s.tabIds) {
-    if (tabId !== src) enqueue(tabId, { ...item, generation: generation(tabId) });
+    if (tabId === src) continue;
+    const target = { ...item, generation: generation(tabId) };
+    if (ev.kind === 'cursor' || ev.kind === 'press') enqueueVisual(tabId, target);
+    else enqueue(tabId, target);
   }
+}
+
+// One in-flight update and one latest position per frame, independent of action queues.
+// Use cached routes only: decorative traffic must not trigger injection or retries.
+function enqueueVisual(tabId, item) {
+  const route = routes.get(tabId)?.get(item.event.frame);
+  if (!route || availability.has(tabId)) return;
+  let frames = visualLanes.get(tabId);
+  if (!frames) visualLanes.set(tabId, frames = new Map());
+  let lane = frames.get(item.event.frame);
+  if (lane) { lane.latest = item; return; }
+  lane = { latest: item };
+  frames.set(item.event.frame, lane);
+  void (async () => {
+    try {
+      while (visualLanes.get(tabId) === frames && lane.latest) {
+        const next = lane.latest;
+        lane.latest = null;
+        if (!canReplay(tabId, next) || next.source !== leaderTabId || Date.now() - next.queuedAt > 150) continue;
+        await toFrame(tabId, route, { type: 'mts:replay', event: {
+          ...next.event, sequence: next.sequence, epoch: deliveryEpoch, deadline: Date.now() + 150,
+        } }, 150).catch(() => {});
+      }
+    } finally {
+      if (visualLanes.get(tabId) === frames) {
+        frames.delete(item.event.frame);
+        if (!frames.size) visualLanes.delete(tabId);
+      }
+    }
+  })();
 }
 
 function enqueue(tabId, item) {
@@ -475,6 +517,7 @@ function enqueue(tabId, item) {
 async function drain(tabId, queue) {
   while (queues.get(tabId) === queue && queue.length) {
     const item = queue.shift();
+    item.startedAt = Date.now();
     let status = !canReplay(tabId, item) || Date.now() - item.queuedAt > MAX_EVENT_AGE
       ? 'expired' : availability.get(tabId);
     if (!status) {
@@ -510,7 +553,7 @@ async function replayInto(tabId, item) {
   if (remaining <= 0 || !canReplay(tabId, item)) return 'expired';
   const message = {
     type: 'mts:replay',
-    event: { ...ev, deadline: Date.now() + Math.min(remaining, DELIVERY_MS) },
+    event: { ...ev, sequence: item.sequence, epoch: deliveryEpoch, deadline: Date.now() + Math.min(remaining, DELIVERY_MS) },
   };
   try {
     if (ev.kind === 'click' || (ev.kind === 'key' && ev.key === 'Enter')) {
