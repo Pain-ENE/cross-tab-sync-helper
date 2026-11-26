@@ -6,145 +6,108 @@
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
-  <header>
-    <div class="head-text">
-      <h1>跨标签页操作同步助手</h1>
-      <p class="head-sub">一处操作，所有页面实时跟随</p>
-    </div>
-    <label class="switch" title="开/关同步（快捷键 Alt+, 开启 · Alt+. 关闭）">
-      <input type="checkbox" id="enabled">
-      <span class="slider"></span>
-    </label>
+  <header class="header">
+    <img src="icons/icon48.png" alt="" width="36" height="36">
+    <h1>标签页同步</h1>
+    <span class="version">v1.8.4</span>
   </header>
-
   <main>
-    <h2 class="group-title"><span>参与同步的标签页</span><span class="hint" id="count"></span></h2>
-    <section class="card">
-      <ul id="tabs"></ul>
-      <div class="dup-row">
-        <span class="dup-label">把当前标签页复制多份并加入同步组</span>
-        <div class="dup-btns">
-          <button type="button" class="dup-quick" data-n="2">2 份</button>
-          <button type="button" class="dup-quick" data-n="4">4 份</button>
-          <button type="button" class="dup-quick" data-n="6">6 份</button>
-          <button type="button" class="dup-quick" data-n="9">9 份</button>
-          <input id="dupN" type="number" min="1" max="16" step="1" placeholder="自定">
-          <button id="dupGo" type="button" class="prominent">复制</button>
+    <section class="card hero" aria-labelledby="sync-title">
+      <div class="hero-line">
+        <div>
+          <h2 id="sync-title">操作同步</h2>
+          <p id="sync-state" aria-live="polite">正在读取状态…</p>
         </div>
-        <span class="hint dup-msg" id="dupMsg"></span>
+        <label class="switch"><input type="checkbox" id="enabled" role="switch" aria-labelledby="sync-title" disabled><span></span></label>
       </div>
-      <div class="card-pad">
-        <button id="tile" type="button" class="wide">
-          <svg viewBox="0 0 24 24" class="btn-icon" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
-          将勾选的标签页分窗口并排排列
-        </button>
-        <p class="hint center">或按快捷键 <kbd>Alt+Shift+S</kbd>，以当前窗口为基准一键平铺</p>
+      <div class="metrics" id="metrics">
+        <span><span class="metric-value" id="count">0</span> 已选</span>
+        <span><span class="metric-value" id="ready-count">—</span> 已连接</span>
+        <span><span class="metric-value" id="attention-count">—</span> 待核对</span>
       </div>
     </section>
 
-    <h2 class="group-title"><span>不同步的字段</span><span class="hint">各页内容不同，如编号</span></h2>
-    <section class="card">
-      <ul id="excluded"></ul>
-      <div class="card-pad">
-        <button id="addExcluded" type="button" class="wide">
-          <svg viewBox="0 0 24 24" class="btn-icon" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
-          点击页面选择要隔离的字段
-        </button>
+    <section aria-labelledby="tabs-title">
+      <div class="section-head">
+        <h2 id="tabs-title">同步组</h2>
+        <button type="button" id="check" class="text-button" disabled>检查连接</button>
+      </div>
+      <div class="card">
+        <ul id="tabs" aria-label="参与同步的标签页"></ul>
+        <details id="available">
+          <summary>添加标签页 <span id="available-count"></span></summary>
+          <ul id="other-tabs" aria-label="可添加的标签页"></ul>
+        </details>
       </div>
     </section>
 
-    <h2 class="group-title"><span>同步内容</span></h2>
-    <section class="card">
-      <ul class="opt-list">
-        <li>
-          <label class="row">
-            <span class="icon" style="--ic:#0088ff"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v18M5 8l7-5 7 5M5 16l7 5 7-5" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
-            <span class="row-text">滚动</span>
-            <span class="switch"><input type="checkbox" data-opt="scroll"><span class="slider"></span></span>
-          </label>
-        </li>
-        <li>
-          <label class="row">
-            <span class="icon" style="--ic:#34c759"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3l14 8-6 2-2 6z" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
-            <span class="row-text">鼠标点击</span>
-            <span class="switch"><input type="checkbox" data-opt="click"><span class="slider"></span></span>
-          </label>
-        </li>
-        <li>
-          <label class="row">
-            <span class="icon" style="--ic:#6155f5"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6" width="18" height="12" rx="2" fill="none" stroke-width="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M7 14h.01M11 14h6" fill="none" stroke-width="2" stroke-linecap="round"/></svg></span>
-            <span class="row-text">键盘与输入</span>
-            <span class="switch"><input type="checkbox" data-opt="keys"><span class="slider"></span></span>
-          </label>
-        </li>
-        <li>
-          <label class="row">
-            <span class="icon" style="--ic:#00c3d0"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9M10 20H4v-6M4 20l7-7" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
-            <span class="row-text">页面跳转</span>
-            <span class="switch"><input type="checkbox" data-opt="nav"><span class="slider"></span></span>
-          </label>
-        </li>
-        <li>
-          <label class="row">
-            <span class="icon" style="--ic:#30d158"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3l14 8-6 2-2 6z" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M5 3l14 8-6 2-2 6z" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" transform="translate(4,5) scale(.55)" opacity=".5"/></svg></span>
-            <span class="row-text">镜像鼠标</span>
-            <span class="switch"><input type="checkbox" data-opt="ghost"><span class="slider"></span></span>
-          </label>
-        </li>
-      </ul>
-      <p class="hint pad">点击、滚动或键盘输入接管主控后，其他窗口显示绿色鼠标实时跟随（悬停划过不会误切换）；哪个窗口亮着绿色主控光环、且没有绿鼠标，哪个就是主控窗口。</p>
-      <label class="row inset">
-        <span class="row-text">滚动位置</span>
-        <select data-opt="scrollMode">
-          <option value="absolute">绝对（像素）</option>
-          <option value="relative">相对（页面百分比）</option>
-        </select>
-      </label>
+    <div class="actions">
+      <button id="tile" class="button primary" type="button" disabled>平铺窗口</button>
+      <button id="dup-toggle" class="button secondary" type="button" aria-controls="duplicate" aria-expanded="false">复制当前页</button>
+    </div>
+    <section class="card controls" id="duplicate" hidden aria-label="复制当前标签页">
+      <p>复制空白模板页，新标签页会加入同步组。</p>
+      <div class="duplicate-actions">
+        <button type="button" class="dup-quick button secondary" data-n="2">2 份</button>
+        <button type="button" class="dup-quick button secondary" data-n="4">4 份</button>
+        <button type="button" class="dup-quick button secondary" data-n="6">6 份</button>
+        <button type="button" class="dup-quick button secondary" data-n="9">9 份</button>
+        <input id="dupN" type="number" min="1" max="16" step="1" placeholder="1–16" aria-label="自定义复制份数">
+        <button id="dupGo" type="button" class="button primary">复制</button>
+      </div>
+    </section>
+    <p class="feedback" id="feedback" role="status" hidden></p>
+
+    <section aria-labelledby="isolation-title">
+      <div class="section-head"><h2 id="isolation-title">不同步的字段</h2></div>
+      <div class="card">
+        <ul id="excluded"></ul>
+        <button id="addExcluded" type="button" class="text-button full" disabled>＋ 在页面上选取</button>
+      </div>
     </section>
 
-    <h2 class="group-title"><span>高级</span></h2>
-    <section class="card">
-      <label class="row inset two-line">
-        <span class="icon" style="--ic:#ff8d28"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke-width="2"/><circle cx="12" cy="12" r="5" fill="none" stroke-width="2"/><circle cx="12" cy="12" r="1.2" fill="currentColor"/></svg></span>
-        <span class="row-text">
-          <strong>精确模式</strong>
-          <span class="hint">通过浏览器调试接口派发真实点击与按键，适合普通模式不起作用的页面；开启后浏览器顶部会出现黄色提示条。</span>
-        </span>
-        <span class="switch"><input type="checkbox" data-opt="precision"><span class="slider warn-slider"></span></span>
-      </label>
-    </section>
-
-    <footer>
-      <p class="hint"><kbd>Alt+,</kbd> 开启同步 · <kbd>Alt+.</kbd> 关闭同步 · <kbd>Alt+Shift+G</kbd> 当前页加入/移出 · <kbd>Alt+Shift+S</kbd> 并排平铺<br>
-      每次开关切换，各参与页弹提示条并伴随系统通知。密码框永远不会被同步。</p>
-      <p class="hint dim">推荐流程：① 打开模板页，点「2/4/6/9 份」批量复制 → ② 保持开关关闭，逐页填好各自不同的编号 → ③ <kbd>Alt+Shift+S</kbd> 平铺同屏 → ④ 开启同步，一处操作全部跟随 → ⑤ 逐窗核对后手动提交（可把「提交」按钮加入隔离名单，防止误点连带）。</p>
-    </footer>
+    <details class="card settings">
+      <summary>同步设置与快捷键</summary>
+      <div class="settings-content">
+        <label class="setting">鼠标点击与拖选<span class="switch"><input type="checkbox" data-opt="click" role="switch"><span></span></span></label>
+        <label class="setting">键盘与输入<span class="switch"><input type="checkbox" data-opt="keys" role="switch"><span></span></span></label>
+        <label class="setting">滚动<span class="switch"><input type="checkbox" data-opt="scroll" role="switch"><span></span></span></label>
+        <label class="setting">滚动位置<select data-opt="scrollMode"><option value="absolute">绝对像素</option><option value="relative">页面百分比</option></select></label>
+        <label class="setting">页面跳转<span class="switch"><input type="checkbox" data-opt="nav" role="switch"><span></span></span></label>
+        <label class="setting">镜像鼠标<span class="switch"><input type="checkbox" data-opt="ghost" role="switch"><span></span></span></label>
+        <div class="setting color-setting" data-color="ghostColor">
+          <span id="cursor-color-label">副鼠标颜色</span>
+          <div class="color-controls">
+            <input class="color-picker" type="color" aria-labelledby="cursor-color-label">
+            <input class="color-hex" type="text" aria-label="副鼠标 HEX 色值" maxlength="7" spellcheck="false" autocomplete="off">
+          </div>
+        </div>
+        <div class="setting color-setting" data-color="themeColor">
+          <span id="theme-color-label">界面主题色</span>
+          <div class="color-controls">
+            <input class="color-picker" type="color" aria-labelledby="theme-color-label">
+            <input class="color-hex" type="text" aria-label="主题 HEX 色值" maxlength="7" spellcheck="false" autocomplete="off">
+          </div>
+        </div>
+        <label class="setting"><span>精确模式<small>普通模式无法触发操作时试用。浏览器会显示调试提示。</small></span><span class="switch"><input type="checkbox" data-opt="precision" role="switch"><span></span></span></label>
+      </div>
+      <div class="shortcuts">
+        <span><kbd>Alt+,</kbd> 开启</span><span><kbd>Alt+.</kbd> 关闭</span>
+        <span><kbd>Alt+Shift+G</kbd> 加入或移出</span><span><kbd>Alt+Shift+S</kbd> 平铺</span>
+      </div>
+    </details>
   </main>
-
   <template id="tab-row">
-    <li>
-      <label>
-        <input type="checkbox">
-        <img class="favicon" alt="" width="16" height="16">
-        <span class="text">
-          <span class="title"></span>
-          <span class="url"></span>
-          <span class="error"></span>
-        </span>
-        <span class="warn" hidden>⚠</span>
-        <span class="tab-check" aria-hidden="true"></span>
-      </label>
+    <li class="tab-row">
+      <button type="button" class="tab-open">
+        <span class="tab-icon" aria-hidden="true"></span>
+        <span class="tab-label"><span class="tab-title"></span><small class="tab-url"></small></span>
+      </button>
+      <span class="tab-result" hidden></span>
+      <input class="tab-select" type="checkbox">
     </li>
   </template>
-
-  <template id="excluded-row">
-    <li>
-      <span class="ex-label"></span>
-      <code class="ex-key"></code>
-      <button class="ex-remove" type="button" title="移除该字段">移除</button>
-    </li>
-  </template>
-
+  <script src="cursor-colors.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

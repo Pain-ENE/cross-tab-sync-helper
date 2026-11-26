@@ -2,6 +2,9 @@
 // 管理同步组、注入内容脚本、在标签页之间路由事件，
 // 并管理"字段隔离"名单与点选模式。
 
+importScripts('cursor-colors.js');
+const cursorColors = globalThis.mtsCursorColors;
+
 const DEFAULT_STATE = {
   enabled: false,
   tabIds: [],
@@ -12,6 +15,8 @@ const DEFAULT_STATE = {
     nav: true,
     scrollMode: 'absolute', // 'absolute' | 'relative'
     precision: false,
+    ghostColor: cursorColors.defaultColor,
+    themeColor: cursorColors.defaultColor,
     ghost: true, // 镜像鼠标：在其他标签页显示主控页鼠标位置与动作
     excluded: [], // 不同步的字段：[{ key: 'name:xxx' | 'id:xxx', label: '显示名' }]
   },
@@ -21,13 +26,11 @@ const CATEGORY = { scroll: 'scroll', click: 'click', focus: 'click', key: 'keys'
 
 // 在某标签页回放事件后的一小段时间内忽略来自该页的事件，
 // 防止回放引发的滚动、聚焦、输入等再次被广播出去（回环）。
-const REPLAY_QUIET_MS = 250;
 const NAV_DELAY_MS = 400;
 const CDP_VERSION = '1.3';
 
 const lastReplay = new Map(); // tabId -> 最近一次回放完成时间
-const inFlight = new Map();   // tabId -> 正在排队/执行的回放数量
-const queues = new Map();     // tabId -> Promise（每个标签页的回放串行化）
+const queues = new Map();     // 每个目标页独立有序队列
 const attachedTabs = new Set();
 let leaderTabId = null;
 let pickerOn = false;
@@ -37,16 +40,30 @@ let pickerOn = false;
 // ---------------------------------------------------------------------------
 function normalize(s) {
   const opts = { ...DEFAULT_STATE.opts, ...(s?.opts || {}) };
+  opts.ghostColor = cursorColors.normalize(opts.ghostColor);
+  opts.themeColor = cursorColors.normalize(opts.themeColor);
   opts.excluded = Array.isArray(opts.excluded) ? opts.excluded : [];
   return { ...DEFAULT_STATE, ...s, opts, tabIds: s?.tabIds || [] };
 }
 
 let state = DEFAULT_STATE;
-let appliedSeq = 0; // 已应用的最新状态版本号，防止旧消息把新状态回滚
-const ready = chrome.storage.session.get(['state', 'leader']).then((r) => {
+let syncRun = 0;
+const ready = Promise.all([
+  chrome.storage.session.get(['state', 'leader', 'receipts']),
+  chrome.storage.local.get(['ghostColor', 'themeColor']).catch(() => ({})),
+]).then(([r, saved]) => {
   state = normalize(r.state);
-  appliedSeq = state.seq || 0;
-  leaderTabId = r.leader ?? null;
+  state.opts.ghostColor = cursorColors.normalize(saved.ghostColor ?? state.opts.ghostColor);
+  state.opts.themeColor = cursorColors.normalize(saved.themeColor ?? state.opts.themeColor);
+  leaderTabId = state.tabIds.includes(r.leader) && state.enabled ? r.leader : null;
+  if (state.enabled) {
+    for (const id of state.tabIds) {
+      const receipt = r.receipts?.[id];
+      if (!receipt) continue;
+      outcomes.set(id, receipt);
+      eventSequence = Math.max(eventSequence, receipt.sequence);
+    }
+  }
 });
 
 async function getState() {
@@ -54,41 +71,39 @@ async function getState() {
   return state;
 }
 
-async function updateState(mutate, opts = {}) {
-  const prev = await getState();
-  const next = structuredClone(prev);
-  next.seq = (next.seq || 0) + 1;
-  mutate(next);
-  state = normalize(next);
-  appliedSeq = Math.max(appliedSeq, state.seq || 0);
-  await chrome.storage.session.set({ state });
-  await reconcile(prev, state, opts.announce !== false);
-}
-
-// popup 等外部入口改完状态后发来的刷新请求：读最新状态并应用。
-// 必须走消息链（runtime.sendMessage 能唤醒空闲的 Service Worker；
-// 而 storage.onChanged 不会唤醒），否则 SW 睡着时会丢失注入与提示。
-// 并发到达的旧版本消息直接丢弃，避免把新状态回滚。
-let refreshChain = Promise.resolve();
-function refresh(opts = {}) {
-  const run = refreshChain.then(async () => {
-    const r = await chrome.storage.session.get('state');
-    const next = normalize(r.state);
-    const nextSeq = next.seq || 0;
-    if (nextSeq <= appliedSeq) return; // 过期消息，丢弃
-    const prev = state;
-    state = next;
-    appliedSeq = nextSeq;
-    await reconcile(prev, next, opts.announce !== false);
+// Popup 和快捷键提交变更指令，状态由 Service Worker 串行写入。
+let stateWrites = Promise.resolve();
+function updateState(mutate, opts = {}) {
+  const run = stateWrites.then(async () => {
+    const prev = await getState();
+    const next = structuredClone(prev);
+    mutate(next);
+    if (next.tabIds.length < 2) next.enabled = false;
+    if (prev.enabled !== next.enabled) {
+      syncRun++;
+      outcomes.clear();
+      scheduleReceipts();
+    }
+    const normalized = normalize(next);
+    if (prev.opts.ghostColor !== normalized.opts.ghostColor || prev.opts.themeColor !== normalized.opts.themeColor) {
+      await chrome.storage.local.set({
+        ghostColor: normalized.opts.ghostColor,
+        themeColor: normalized.opts.themeColor,
+      });
+    }
+    state = normalized;
+    await chrome.storage.session.set({ state });
+    await reconcile(prev, state, opts.announce !== false);
+    return state;
   });
-  refreshChain = run.catch(() => {});
+  stateWrites = run.catch(() => {});
   return run;
 }
 
 function setLeader(tabId) {
   if (leaderTabId === tabId) return;
   leaderTabId = tabId;
-  chrome.storage.session.set({ leader: tabId });
+  chrome.storage.session.set({ leader: tabId }).catch(() => {});
   broadcastLeader();
 }
 
@@ -102,20 +117,11 @@ async function broadcastLeader() {
   }
 }
 
-async function setTabError(tabId, message) {
-  const { tabErrors = {} } = await chrome.storage.session.get('tabErrors');
-  if (message) tabErrors[tabId] = message;
-  else if (tabId in tabErrors) delete tabErrors[tabId];
-  else return;
-  await chrome.storage.session.set({ tabErrors });
+const tabErrors = new Map();
+function setTabError(tabId, message) {
+  if (message) tabErrors.set(tabId, message);
+  else tabErrors.delete(tabId);
 }
-
-chrome.storage.onChanged.addListener(async (changes, area) => {
-  // 仅用于 popup 正在打开时快速同步显示；注入与提示统一由消息链（mts:refresh）驱动，
-  // 不在此处 reconcile，避免 SW 空闲后被 storage 事件丢掉的时序问题
-  if (area !== 'session' || !changes.state) return;
-  await ready;
-});
 
 // 按新状态调整注入、调试器连接；announce=false 时不弹切换提示（冷启动）
 async function reconcile(prev, next, announce = true) {
@@ -132,8 +138,16 @@ async function reconcile(prev, next, announce = true) {
   }
 
   const newActive = nextActive.filter((t) => !prevActive.includes(t));
-  for (const t of newActive) inject(t);
-  for (const t of prevActive) if (!nextActive.includes(t)) teardownTab(t);
+  for (const t of prevActive) {
+    if (!nextActive.includes(t)) {
+      invalidate(t, true);
+      availability.delete(t);
+      setTabError(t, null);
+      teardownTab(t);
+    }
+  }
+  if (!nextActive.includes(leaderTabId)) setLeader(null);
+  const injections = newActive.map((t) => inject(t));
 
   const prevDbg = prev.enabled && prev.opts.precision ? prev.tabIds : [];
   const nextDbg = next.enabled && next.opts.precision ? next.tabIds : [];
@@ -142,22 +156,23 @@ async function reconcile(prev, next, announce = true) {
 
   // 字段隔离名单 / 镜像鼠标开关有变化 -> 通知所有相关标签页
   if (JSON.stringify(prev.opts.excluded) !== JSON.stringify(next.opts.excluded)
-      || !!prev.opts.ghost !== !!next.opts.ghost) {
-    broadcastConfig(next);
+      || !!prev.opts.ghost !== !!next.opts.ghost || prev.opts.ghostColor !== next.opts.ghostColor) {
+    await broadcastConfig(next);
   }
 
   updateBadge(next);
 
-  if (turningOn) {
+  if (turningOn && announce) {
     // 等新勾选的页面全部注入完成后再广播开启提示
     if (nextActive.length) {
-      await Promise.all(nextActive.map((t) => inject(t).catch(() => null)));
+      await Promise.all(injections);
       broadcastToast(true, nextActive);
       systemNotify(true, nextActive.length);
     } else if (announce) {
       systemNotify(true, 0); // 无页面可提示，用系统通知提醒先勾选
     }
   }
+  await Promise.all(injections);
 }
 
 // ---------------------------------------------------------------------------
@@ -184,17 +199,19 @@ function systemNotify(on, count) {
   } catch { /* 系统通知不可用时忽略，页面提示条为主 */ }
 }
 
+function configFor(t, s = state) {
+  return { type: 'mts:config', enabled: s.enabled, excluded: s.opts.excluded, ghost: !!s.opts.ghost, ghostColor: s.opts.ghostColor, leader: t === leaderTabId };
+}
+
 async function broadcastConfig(s = state) {
-  for (const t of s.tabIds) {
-    const msg = { type: 'mts:config', excluded: s.opts.excluded, ghost: !!s.opts.ghost, leader: t === leaderTabId };
-    chrome.tabs.sendMessage(t, msg).catch(() => {});
-  }
+  await Promise.all(s.tabIds.map((t) =>
+    deadline(chrome.tabs.sendMessage(t, configFor(t, s))).catch(() => {})));
 }
 
 function updateBadge(s) {
   const n = s.tabIds.length;
   chrome.action.setBadgeText({ text: s.enabled && n ? String(n) : '' });
-  chrome.action.setBadgeBackgroundColor({ color: s.opts.precision ? '#c2410c' : '#34c759' });
+  chrome.action.setBadgeBackgroundColor({ color: s.opts.precision ? '#9a471e' : '#39746c' });
   chrome.action.setTitle({
     title: s.enabled
       ? `跨标签页操作同步助手：同步已开启（${n} 个标签页${s.opts.precision ? '，精确模式' : ''}）`
@@ -205,15 +222,55 @@ function updateBadge(s) {
 // ---------------------------------------------------------------------------
 // 内容脚本注入
 // ---------------------------------------------------------------------------
-async function inject(tabId) {
-  try {
-    await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: ['content.js'] });
-    await setTabError(tabId, null);
-    // 注入后下发当前字段隔离名单与主控身份
-    chrome.tabs.sendMessage(tabId, { type: 'mts:config', excluded: state.opts.excluded, ghost: !!state.opts.ghost, leader: tabId === leaderTabId }).catch(() => {});
-  } catch (err) {
-    await setTabError(tabId, err.message || String(err));
-  }
+function pageAvailability(tab) {
+  if (tab.discarded) return 'discarded';
+  if (tab.frozen) return 'frozen';
+  if (tab.status === 'loading') return 'loading';
+  return null;
+}
+
+function inject(tabId, allowPaused = false) {
+  if (preparing.has(tabId)) return preparing.get(tabId);
+  const version = generation(tabId);
+  const script = (allFrames) => deadline(chrome.scripting.executeScript({
+    target: { tabId, allFrames }, files: ['cursor-colors.js', 'content.js'],
+  }));
+  const task = (async () => {
+    const tab = await chrome.tabs.get(tabId);
+    const problem = pageAvailability(tab);
+    if (problem) {
+      if (generation(tabId) === version) {
+        routes.delete(tabId);
+        availability.set(tabId, problem);
+      }
+      return;
+    }
+    let results;
+    try { results = await script(true); }
+    catch (error) {
+      if (error.message === 'timeout') throw error;
+      results = await script(false);
+    }
+    if (generation(tabId) !== version || !state.tabIds.includes(tabId) ||
+        (!state.enabled && !allowPaused)) return;
+    const frames = new Map(results.filter((r) => typeof r.result === 'string')
+      .map((r) => [r.result, { frameId: r.frameId, documentId: r.documentId }]));
+    if (!frames.has('top')) throw new Error('页面脚本未就绪');
+    await Promise.all([...frames.values()].map((frame) =>
+      toFrame(tabId, frame, configFor(tabId)).catch((error) => {
+        if (frame.frameId === 0) throw error;
+      })));
+    if (generation(tabId) !== version) return;
+    routes.set(tabId, frames);
+    availability.delete(tabId);
+    setTabError(tabId, null);
+  })().catch((error) => {
+    if (generation(tabId) === version) setTabError(tabId, error.message);
+  }).finally(() => {
+    if (preparing.get(tabId) === task) preparing.delete(tabId);
+  });
+  preparing.set(tabId, task);
+  return task;
 }
 
 function teardownTab(tabId) {
@@ -263,28 +320,10 @@ function cdpModifiers(m = {}) {
 
 const EDIT_COMMANDS = { a: 'selectAll', c: 'copy', x: 'cut', v: 'paste', z: 'undo', y: 'redo' };
 
-async function preciseClick(tabId, ev) {
-  // 双击回退合成回放：CDP 键盘命令在转发链路中存在悬挂风险（会卡住回放
-  // 队列），且转发后双击时序窗口不稳定；合成回放已含 dblclick + F2 兜底
-  //（进入编辑态的主通道），对接受合成事件的页面稳定可靠。拒收合成事件
-  // 的极端页面可在主控页按 F2（走可靠的 CDP 真实键通道同步）。
-  if ((ev.detail || 1) >= 2) return false;
-  const pt = await chrome.tabs.sendMessage(tabId, { type: 'mts:locate', event: ev }, { frameId: 0 }).catch(() => null);
-  // 隐藏的标签页不会渲染 -> CDP 命中测试会过期，退回普通回放
-  if (!pt || !pt.visible) return false;
-  try {
-    await attachDebugger(tabId);
-    const base = { x: pt.x, y: pt.y, modifiers: cdpModifiers(ev.mods) };
-    const clickCount = ev.detail || 1;
-    const press = (cnt) => cdp(tabId, 'Input.dispatchMouseEvent', { ...base, type: 'mousePressed', button: 'left', buttons: 1, clickCount: cnt });
-    const release = (cnt) => cdp(tabId, 'Input.dispatchMouseEvent', { ...base, type: 'mouseReleased', button: 'left', buttons: 0, clickCount: cnt });
-    await cdp(tabId, 'Input.dispatchMouseEvent', { ...base, type: 'mouseMoved' });
-    await press(clickCount);
-    await release(clickCount);
-    return true;
-  } catch {
-    return false;
-  }
+async function preciseClick(tabId, ev, point) {
+  const base = { x: point.x, y: point.y, modifiers: cdpModifiers(ev.mods), button: 'left', clickCount: 1 };
+  await deadline(cdp(tabId, 'Input.dispatchMouseEvent', { ...base, type: 'mousePressed', buttons: 1 }), 320);
+  await deadline(cdp(tabId, 'Input.dispatchMouseEvent', { ...base, type: 'mouseReleased', buttons: 0 }), 320);
 }
 
 async function preciseKey(tabId, ev) {
@@ -311,90 +350,217 @@ async function preciseKey(tabId, ev) {
     if (cmd === 'undo' && m.shift) cmd = 'redo';
     if (cmd) params.commands = [cmd];
   }
-  try {
-    await attachDebugger(tabId);
-    await cdp(tabId, 'Input.dispatchKeyEvent', params);
-    return true;
-  } catch {
-    return false;
-  }
+  await cdp(tabId, 'Input.dispatchKeyEvent', params);
 }
 
 // ---------------------------------------------------------------------------
 // 事件路由
 // ---------------------------------------------------------------------------
+const routes = new Map();
+const preparing = new Map();
+const generations = new Map();
+const availability = new Map();
+const outcomes = new Map();
+const MAX_PENDING = 48;
+const DELIVERY_MS = 700;
+const MAX_EVENT_AGE = 1600;
+let eventSequence = 0;
+let receiptTimer;
+function scheduleReceipts() {
+  if (receiptTimer) return;
+  receiptTimer = setTimeout(() => {
+    receiptTimer = null;
+    chrome.storage.session.set({ receipts: Object.fromEntries(outcomes) }).catch(() => {});
+  }, 250);
+}
+
+function generation(tabId) {
+  return generations.get(tabId) || 0;
+}
+
+function invalidate(tabId, clearOutcome = false) {
+  generations.set(tabId, generation(tabId) + 1);
+  routes.delete(tabId);
+  preparing.delete(tabId);
+  queues.delete(tabId);
+  if (clearOutcome && outcomes.delete(tabId)) scheduleReceipts();
+}
+
+function deadline(promise, ms = DELIVERY_MS) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error('timeout')), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+function canReplay(tabId, item) {
+  return state.enabled && state.tabIds.includes(tabId) &&
+    state.tabIds.includes(item.source) && generation(tabId) === item.generation &&
+    syncRun === item.run && !!state.opts[CATEGORY[item.event.kind]];
+}
+
+function report(tabId, item, code) {
+  if (isVisual(item.event) || !canReplay(tabId, item)) return;
+  const previous = outcomes.get(tabId);
+  if (previous && previous.sequence > item.sequence) return;
+  const latency = Date.now() - item.queuedAt;
+  outcomes.set(tabId, {
+    code, latency, sequence: item.sequence, at: Date.now(),
+    missed: (previous?.missed || 0) + (code === 'applied' || code === 'isolated' ? 0 : 1),
+  });
+  scheduleReceipts();
+}
+
+function isVisual(ev) {
+  return ev.kind === 'cursor' || ev.kind === 'press' || ev.kind === 'focus' ||
+    ev.kind === 'dragmove' || (ev.kind === 'key' && ev.type === 'keyup');
+}
+
+function replaceable(ev) {
+  return ['cursor', 'dragmove', 'scroll'].includes(ev.kind);
+}
+
 async function handleEvent(ev, sender) {
   const s = await getState();
   const src = sender.tab?.id;
-  if (!s.enabled || src == null || !s.tabIds.includes(src)) return;
-  if (isQuiet(src)) return;
-  if (!s.opts[CATEGORY[ev.kind]]) return;
-
+  if (!ev || !s.enabled || !s.tabIds.includes(src) || !s.opts[CATEGORY[ev.kind]]) return;
   if (ev.kind === 'cursor') {
-    // 鼠标位置镜像只有主控页有效：点击/滚动/键盘输入才会接管主控，
-    // 纯悬停划过其他窗口不广播，避免绿鼠标在平铺窗口间乱闪（v1.6）
     if (src !== leaderTabId) return;
   } else {
     setLeader(src);
   }
   if (ev.kind === 'scroll') ev.mode = s.opts.scrollMode;
-  // 精确模式只用于来自顶层框架的事件（CDP 坐标基于主视口）
-  const precise = s.opts.precision && sender.frameId === 0;
-
-  for (const t of s.tabIds) {
-    if (t === src) continue;
-    enqueue(t, () => replayInto(t, ev, precise));
+  const item = {
+    event: ev, source: src, precise: s.opts.precision && sender.frameId === 0,
+    queuedAt: Date.now(), sequence: ++eventSequence, run: syncRun,
+  };
+  for (const tabId of s.tabIds) {
+    if (tabId !== src) enqueue(tabId, { ...item, generation: generation(tabId) });
   }
 }
 
-function isQuiet(tabId) {
-  return (inFlight.get(tabId) || 0) > 0 || Date.now() - (lastReplay.get(tabId) || 0) < REPLAY_QUIET_MS;
-}
-
-function enqueue(tabId, job) {
-  inFlight.set(tabId, (inFlight.get(tabId) || 0) + 1);
-  const prev = queues.get(tabId) || Promise.resolve();
-  const next = prev
-    .then(job)
-    .catch((err) => console.debug('[跨标签页操作同步助手] 回放失败', tabId, err))
-    .finally(() => {
-      inFlight.set(tabId, inFlight.get(tabId) - 1);
-      lastReplay.set(tabId, Date.now());
-    });
-  queues.set(tabId, next);
-}
-
-// 精确模式抑制窗口的发送去重（每标签页 300ms 内只发一次）
-const quietSent = new Map();
-
-async function replayInto(tabId, ev, precise) {
-  if (precise) {
-    // CDP 回放的事件 isTrusted=true，目标页内容脚本会把它当成真实用户输入
-    // 再次广播（回环 + 回声劫持主控 + isQuiet 误伤后续真实双击——两击间隔
-    // 小于回环静默窗口）。回放前先通知目标页进入短暂抑制窗口，从源头断回环
-    const last = quietSent.get(tabId) || 0;
-    if (Date.now() - last > 300) {
-      quietSent.set(tabId, Date.now());
-      await chrome.tabs.sendMessage(tabId, { type: 'mts:quiet', ms: 400 }).catch(() => {});
+function enqueue(tabId, item) {
+  let queue = queues.get(tabId);
+  if (!queue) {
+    queue = [];
+    queues.set(tabId, queue);
+    queue.push(item);
+    void drain(tabId, queue);
+    return;
+  }
+  const last = queue.at(-1);
+  if (last && replaceable(item.event) && last.source === item.source &&
+      last.event.kind === item.event.kind && last.event.frame === item.event.frame &&
+      last.event.sel === item.event.sel) {
+    queue[queue.length - 1] = item;
+    return;
+  }
+  if (item.event.kind === 'cursor' && queue.length) return;
+  if (queue.length >= MAX_PENDING) {
+    const index = queue.findIndex((entry) => isVisual(entry.event));
+    if (index >= 0 && !isVisual(item.event)) queue.splice(index, 1);
+    else {
+      report(tabId, item, 'busy');
+      return;
     }
   }
-  // 输入法上屏的增量文本：精确模式用 CDP Input.insertText（真实输入通道，
-  // 对拒收合成事件的自绘编辑器也 100% 有效）；编辑器未聚焦时静默失败
-  // 回退普通回放
-  if (precise && ev.kind === 'input' && ev.ins && await preciseInsertText(tabId, ev)) return;
-  if (precise && ev.kind === 'click' && await preciseClick(tabId, ev)) return;
-  if (precise && ev.kind === 'key' && await preciseKey(tabId, ev)) return;
-  // 不指定 frameId：消息发给所有框架，匹配的框架按 FRAME_KEY 过滤
-  await chrome.tabs.sendMessage(tabId, { type: 'mts:replay', event: ev }).catch(() => {});
+  queue.push(item);
 }
 
-async function preciseInsertText(tabId, ev) {
+async function drain(tabId, queue) {
+  while (queues.get(tabId) === queue && queue.length) {
+    const item = queue.shift();
+    if (!canReplay(tabId, item)) continue;
+    const unavailable = availability.get(tabId);
+    if (unavailable) {
+      report(tabId, item, unavailable);
+      continue;
+    }
+    if (Date.now() - item.queuedAt > MAX_EVENT_AGE) {
+      report(tabId, item, 'expired');
+      continue;
+    }
+    let status;
+    try {
+      status = await replayInto(tabId, item);
+    } catch (error) {
+      status = error.message === 'timeout' ? 'timeout' : 'disconnected';
+    }
+    report(tabId, item, status);
+  }
+  if (queues.get(tabId) === queue) queues.delete(tabId);
+}
+
+function toFrame(tabId, route, msg, ms) {
+  const options = route.documentId ? { documentId: route.documentId } : { frameId: route.frameId };
+  return deadline(chrome.tabs.sendMessage(tabId, msg, options), ms);
+}
+
+async function replayInto(tabId, item) {
+  const ev = item.event;
+  let route = routes.get(tabId)?.get(ev.frame);
+  if (!route) {
+    // Missing iframe may have been mounted after top-document load.
+    if (isVisual(ev) && routes.has(tabId)) return 'missing-frame';
+    await inject(tabId);
+    if (!canReplay(tabId, item)) return 'expired';
+    route = routes.get(tabId)?.get(ev.frame);
+  }
+  if (!route) return availability.get(tabId) || (routes.has(tabId) ? 'missing-frame' : 'disconnected');
+  const remaining = MAX_EVENT_AGE - (Date.now() - item.queuedAt);
+  if (remaining <= 0 || !canReplay(tabId, item)) return 'expired';
+  const message = {
+    type: 'mts:replay',
+    event: { ...ev, deadline: Date.now() + Math.min(remaining, DELIVERY_MS) },
+  };
   try {
-    await attachDebugger(tabId);
-    await cdp(tabId, 'Input.insertText', { text: ev.ins });
-    return true;
-  } catch {
-    return false;
+    if (ev.kind === 'click' || (ev.kind === 'key' && ev.key === 'Enter')) {
+      lastReplay.set(tabId, Date.now());
+    }
+    if (item.precise && (ev.kind === 'key' || (ev.kind === 'click' && ev.detail < 2) ||
+        (ev.kind === 'input' && ev.ins))) {
+      const status = await preciseReplay(tabId, route, item);
+      if (status) return status;
+      if (!canReplay(tabId, item)) return 'expired';
+    }
+    if (Date.now() >= message.event.deadline || !canReplay(tabId, item)) return 'expired';
+    return await toFrame(tabId, route, message, message.event.deadline - Date.now()) || 'disconnected';
+  } catch (error) {
+    // 下一项会重新探测。当前动作可能已经执行，不能补发点击。
+    if (error.message !== 'timeout') routes.delete(tabId);
+    throw error;
+  }
+}
+
+async function preciseReplay(tabId, route, item) {
+  const ev = item.event;
+  // 输入事件会回放实际文本；避免 CDP 在富文本中把同一个字符插入两次。
+  if (ev.kind === 'key' && ev.editable && ev.key.length === 1 &&
+      !ev.mods?.ctrl && !ev.mods?.meta && !ev.mods?.alt) return null;
+  let point;
+  try {
+    if (ev.kind === 'click') {
+      point = await toFrame(tabId, route, { type: 'mts:locate', event: ev });
+      if (!point?.visible) return null;
+    } else if (!(await toFrame(tabId, route, { type: 'mts:precision-target', event: ev }))) {
+      return null;
+    }
+    await deadline(attachDebugger(tabId));
+    if (!canReplay(tabId, item) || Date.now() - item.queuedAt > MAX_EVENT_AGE) return 'expired';
+  } catch { return null; }
+  const token = item.sequence;
+  try {
+    await toFrame(tabId, route, { type: 'mts:quiet', token, ms: DELIVERY_MS + 200 });
+    if (!canReplay(tabId, item) || Date.now() - item.queuedAt > MAX_EVENT_AGE) return 'expired';
+    if (ev.kind === 'click') await deadline(preciseClick(tabId, ev, point));
+    else if (ev.kind === 'key') await deadline(preciseKey(tabId, ev));
+    else await deadline(cdp(tabId, 'Input.insertText', { text: ev.ins }));
+    return 'applied';
+  } catch (error) {
+    return error.message === 'timeout' ? 'timeout' : 'failed';
+  } finally {
+    chrome.tabs.sendMessage(tabId, { type: 'mts:unquiet', token }, { frameId: 0 }).catch(() => {});
   }
 }
 
@@ -405,8 +571,11 @@ function pathOf(u) {
   return u.pathname + u.search + u.hash;
 }
 
+let navSequence = 0;
 async function syncNavigation(srcTabId, url) {
-  if (srcTabId !== leaderTabId || isQuiet(srcTabId)) return;
+  if (srcTabId !== leaderTabId || Date.now() - (lastReplay.get(srcTabId) || 0) < NAV_DELAY_MS) return;
+  const run = syncRun;
+  const token = ++navSequence;
   let want;
   try { want = new URL(url); } catch { return; }
   if (!/^https?:$/.test(want.protocol)) return;
@@ -414,12 +583,12 @@ async function syncNavigation(srcTabId, url) {
   // 稍等：回放的链接点击通常会让目标页自行跳转
   await new Promise((r) => setTimeout(r, NAV_DELAY_MS));
   const s = await getState();
-  if (!s.enabled || !s.opts.nav) return;
+  if (!s.enabled || !s.opts.nav || token !== navSequence || run !== syncRun || leaderTabId !== srcTabId) return;
 
   for (const t of s.tabIds) {
     if (t === srcTabId) continue;
     const tab = await chrome.tabs.get(t).catch(() => null);
-    if (!tab) continue;
+    if (!tab || pageAvailability(tab) || token !== navSequence || run !== syncRun || leaderTabId !== srcTabId || !state.tabIds.includes(t)) continue;
     let cur;
     try { cur = new URL(tab.pendingUrl || tab.url); } catch { continue; }
     if (!/^https?:$/.test(cur.protocol) || pathOf(cur) === pathOf(want)) continue;
@@ -431,22 +600,30 @@ async function syncNavigation(srcTabId, url) {
 // ---------------------------------------------------------------------------
 // 标签页生命周期
 // ---------------------------------------------------------------------------
-chrome.tabs.onUpdated.addListener(async (tabId, info) => {
+chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
   const s = await getState();
   if (!s.enabled || !s.tabIds.includes(tabId)) return;
-  // 新文档 -> 重新注入内容脚本（守卫防止重复）
-  if (info.status === 'complete') inject(tabId);
-  if (info.url && s.opts.nav) syncNavigation(tabId, info.url);
+  if ('status' in info || 'frozen' in info || 'discarded' in info) {
+    const problem = pageAvailability(tab);
+    if (problem) {
+      if (availability.get(tabId) !== problem) invalidate(tabId);
+      availability.set(tabId, problem);
+    } else {
+      availability.delete(tabId);
+      void inject(tabId);
+    }
+  }
+  if (info.url && s.opts.nav) void syncNavigation(tabId, info.url);
 });
 
 chrome.tabs.onRemoved.addListener(async (tabId) => {
   attachedTabs.delete(tabId);
-  queues.delete(tabId);
-  inFlight.delete(tabId);
+  invalidate(tabId, true);
+  availability.delete(tabId);
   lastReplay.delete(tabId);
+  setTabError(tabId, null);
   const s = await getState();
   if (s.tabIds.includes(tabId)) await updateState((n) => { n.tabIds = n.tabIds.filter((t) => t !== tabId); });
-  await setTabError(tabId, null);
 });
 
 chrome.tabs.onReplaced.addListener(async (addedTabId, removedTabId) => {
@@ -456,11 +633,19 @@ chrome.tabs.onReplaced.addListener(async (addedTabId, removedTabId) => {
 });
 
 // 用户当前操作的标签页作为导航同步的"主导标签页"
+let focusChange = 0;
 async function leaderFromWindow(windowId) {
-  if (windowId === chrome.windows.WINDOW_ID_NONE) return;
-  const [tab] = await chrome.tabs.query({ active: true, windowId });
-  const s = await getState();
-  if (tab && s.tabIds.includes(tab.id)) setLeader(tab.id);
+  const change = ++focusChange;
+  if (tileTask || windowId === chrome.windows.WINDOW_ID_NONE) return;
+  const [tabs, window, s] = await Promise.all([
+    chrome.tabs.query({ active: true, windowId }).catch(() => []),
+    chrome.windows.get(windowId).catch(() => null),
+    getState(),
+  ]);
+  const tab = tabs[0];
+  if (change === focusChange && !tileTask && window?.focused && tab && s.tabIds.includes(tab.id)) {
+    setLeader(tab.id);
+  }
 }
 
 chrome.windows.onFocusChanged.addListener(leaderFromWindow);
@@ -469,10 +654,23 @@ chrome.tabs.onActivated.addListener(({ windowId }) => leaderFromWindow(windowId)
 // ---------------------------------------------------------------------------
 // 窗口并排排列
 // ---------------------------------------------------------------------------
-async function tileTabs(screen) {
+let tileTask = null;
+function tileTabs(screen, sourceTab) {
+  if (!tileTask) {
+    focusChange++;
+    tileTask = arrangeTiles(screen, sourceTab).finally(() => { tileTask = null; });
+  }
+  return tileTask;
+}
+
+async function arrangeTiles(screen, sourceTab) {
   const { tabIds } = await getState();
   const n = tabIds.length;
   if (!n) return;
+  const leader = leaderTabId;
+  if (!sourceTab) {
+    [sourceTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true }).catch(() => []);
+  }
   // 画布先与所在显示器的工作区求交集：主窗口被拖出屏幕、DPI 混合缩放或多显示器
   // 负坐标时，按画布直接算出的子窗口 bounds 可能超出可用区——浏览器会拒绝整套
   // 坐标，导致所有新窗口叠在默认位置。钳制进工作区后请求始终合法。
@@ -510,6 +708,7 @@ async function tileTabs(screen) {
   const safeW = Math.max(320, Math.min(width, scrW - 16));
   const safeH = Math.max(240, Math.min(height, scrH - 16));
 
+  const placed = new Map();
   for (let i = 0; i < n; i++) {
     const tabId = tabIds[i];
     const left = Math.min(screen.left + (i % cols) * safeW, screen.left + Math.max(0, scrW - safeW));
@@ -523,17 +722,36 @@ async function tileTabs(screen) {
       if (win.tabs.length === 1) {
         if (win.state !== 'normal') await chrome.windows.update(win.id, { state: 'normal' });
         await chrome.windows.update(win.id, bounds);
+        placed.set(tabId, win.id);
       } else {
-        const created = await chrome.windows.create({ tabId, ...bounds });
+        const created = await chrome.windows.create({ tabId, ...bounds, focused: false });
         // create 的 bounds 在部分环境（最小窗宽限制、窗口超出屏幕、虚拟显示）会被整套忽略，
         // 窗口落到默认位置尺寸；实测 update 对已存在窗口的摆位宽容得多。
         // create 负责拆窗、update 负责摆位，两步配合保证窗口真正各就各位
-        if (created && created.id) await chrome.windows.update(created.id, bounds);
+        if (!Number.isInteger(created?.id)) continue;
+        placed.set(tabId, created.id);
+        await chrome.windows.update(created.id, bounds);
       }
     } catch (err) {
       console.debug('[跨标签页操作同步助手] 平铺单个窗口失败', tabId, err.message);
     }
   }
+
+  // 顺次提升窗口的 Z 顺序。并发提交焦点请求会使最后一个前台窗口不可预测。
+  if (!placed.size) throw new Error('无法排列所选窗口');
+  const primary = [leader, sourceTab?.id].find((id) => placed.has(id)) ?? placed.keys().next().value;
+  const order = [...placed.keys()].filter((id) => id !== primary).concat(primary);
+  let focusedTabId;
+  for (const id of order) {
+    try {
+      await chrome.windows.update(placed.get(id), { focused: true });
+      focusedTabId = id;
+    } catch (err) {
+      console.debug('[跨标签页操作同步助手] 窗口无法置前', id, err.message);
+    }
+  }
+  if (focusedTabId == null) throw new Error('无法激活所选窗口');
+  if ((await getState()).tabIds.includes(focusedTabId)) setLeader(focusedTabId);
 }
 
 // ---------------------------------------------------------------------------
@@ -551,20 +769,38 @@ function setPicker(on) {
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   switch (msg?.type) {
     case 'mts:event':
-      handleEvent(msg.event, sender);
+      void handleEvent(msg.event, sender);
       return;
-    case 'mts:refresh':
-      // popup 改完状态后的刷新请求：runtime 消息必定唤醒空闲的 SW
-      refresh().then(() => sendResponse(true)).catch(() => sendResponse({ error: 'refresh failed' }));
+    case 'mts:diagnostics':
+      getState().then(() => sendResponse({
+        leader: state.enabled ? leaderTabId : null,
+        ready: [...routes.keys()],
+        availability: Object.fromEntries(availability),
+        outcomes: Object.fromEntries(outcomes),
+        errors: Object.fromEntries(tabErrors),
+      }));
+      return true;
+    case 'mts:update':
+      updateState((s) => {
+        if (typeof msg.enabled === 'boolean') s.enabled = msg.enabled && s.tabIds.length >= 2;
+        if (msg.option && msg.option !== 'excluded' && Object.prototype.hasOwnProperty.call(DEFAULT_STATE.opts, msg.option)) {
+          s.opts[msg.option] = msg.value;
+        }
+        if (Array.isArray(msg.add)) s.tabIds = [...new Set([...s.tabIds, ...msg.add.filter(Number.isInteger)])];
+        if (Number.isInteger(msg.remove)) s.tabIds = s.tabIds.filter((id) => id !== msg.remove);
+      }).then(sendResponse, (error) => sendResponse({ error: error.message }));
       return true;
     case 'mts:tile':
       tileTabs(msg.screen).then(() => sendResponse(true), (err) => sendResponse({ error: err.message }));
       return true;
     case 'mts:picker':
       // popup 请求开启/关闭点选模式
-      setPicker(!!msg.on);
-      sendResponse(true);
-      return;
+      getState().then(async (s) => {
+        if (msg.on) await Promise.all(s.tabIds.map((tabId) => inject(tabId, true)));
+        setPicker(!!msg.on);
+        return { on: pickerOn };
+      }).then(sendResponse, (error) => sendResponse({ error: error.message }));
+      return true;
     case 'mts:pick': {
       // 内容脚本上报选中的字段
       if (msg.cancel) { setPicker(false); sendResponse(true); return; }
@@ -580,9 +816,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return;
     }
     case 'mts:remove-excluded':
-      updateState((s) => { s.opts.excluded = s.opts.excluded.filter((f) => f.key !== msg.key); });
-      sendResponse(true);
-      return;
+      updateState((s) => { s.opts.excluded = s.opts.excluded.filter((f) => f.key !== msg.key); })
+        .then(() => sendResponse(true), (error) => sendResponse({ error: error.message }));
+      return true;
+    case 'mts:check':
+      getState().then((s) => Promise.all(s.tabIds.map((tabId) => inject(tabId, true))))
+        .then(() => sendResponse(true), () => sendResponse(false));
+      return true;
     case 'mts:picker-status':
       sendResponse({ on: pickerOn });
       return;
@@ -611,7 +851,8 @@ chrome.commands.onCommand.addListener(async (command, tab) => {
     // 不用回到弹窗点按钮，直接按快捷键以当前窗口为画布重排
     const win = await chrome.windows.getLastFocused().catch(() => null);
     if (!win) return;
-    tileTabs({ left: win.left || 0, top: win.top || 0, width: win.width || 1280, height: win.height || 720 });
+    await tileTabs({ left: win.left || 0, top: win.top || 0, width: win.width || 1280, height: win.height || 720 }, tab)
+      .catch((err) => console.debug('[跨标签页操作同步助手] 快捷键平铺失败', err.message));
   }
 });
 

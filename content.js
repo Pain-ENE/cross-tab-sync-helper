@@ -3,7 +3,7 @@
 // 捕获真实用户事件（isTrusted）并把其他标签页发来的事件在本地回放。
 
 (() => {
-  if (window.__archiveSyncHelper) return;
+  if (window.__archiveSyncHelper) return window.__archiveSyncHelper;
 
   const ac = new AbortController();
   const { signal } = ac;
@@ -13,10 +13,14 @@
   // ---------------------------------------------------------------------------
   const FRAME_KEY = (() => {
     if (window === window.top) return 'top';
-    let depth = 0;
-    let w = window;
-    while (w !== w.top) { depth++; w = w.parent; }
-    return `${depth}:${location.pathname}`;
+    const positions = [];
+    for (let frame = window; frame !== frame.top; frame = frame.parent) {
+      const parent = frame.parent;
+      let index = 0;
+      while (index < parent.length && parent[index] !== frame) index++;
+      positions.unshift(index);
+    }
+    return positions.join('.') + ':' + location.pathname;
   })();
 
   // ---------------------------------------------------------------------------
@@ -133,19 +137,28 @@
   // ---------------------------------------------------------------------------
   // 镜像鼠标（ghost cursor，Apple 风格）：
   // 在其他标签页上显示主控页鼠标的位置与动作，方便平铺核对时
-  // 一眼看到主控窗口正在哪里操作。Apple 系统绿渐变箭头 + 白描边 +
+  // 一眼看到主控窗口正在哪里操作。可选颜色的渐变箭头 + 白描边 +
   // 柔光晕，与系统真实鼠标（黑箭头、无光晕）明显区分。
   // 主控身份由 Service Worker 下发：只有当前主控页广播鼠标位置，
   // 其他页的悬停划过不会引起绿鼠标跳动——点击/滚动/键盘才接管主控；
   // 主控页四边亮绿色主控光环，切换瞬间一眼可辨。
   // 绿鼠标与光环均不产生事件（pointer-events:none），不会造成回环。
   // ---------------------------------------------------------------------------
+  const cursorColors = globalThis.mtsCursorColors;
+  let ghostColor = cursorColors.normalize();
   let ghostOn = true;         // 由 Service Worker 下发的镜像开关
   let leaderSelf = false;     // 本页是否为当前主控（决定是否广播鼠标位置）
   let ghostEl = null;
   let ghostStyleEl = null;
   let ghostTimer = 0;
   let lastCursorSent = 0;
+
+  function applyGhostColor(el) {
+    const color = cursorColors.appearance(ghostColor);
+    el.style.setProperty('--mts-ghost-light', color.light);
+    el.style.setProperty('--mts-ghost-dark', color.dark);
+    el.style.setProperty('--mts-ghost-rgb', color.rgb);
+  }
 
   function ensureGhostStyle() {
     if (ghostStyleEl) return;
@@ -155,16 +168,16 @@
         pointer-events: none; opacity: 0;
         transition: opacity .3s cubic-bezier(.28,.11,.32,1); will-change: transform; }
       .mts-ghost-cursor svg { display: block;
-        filter: drop-shadow(0 1px 2px rgba(0,0,0,.4)) drop-shadow(0 0 9px rgba(52,199,89,.55));
+        filter: drop-shadow(0 1px 2px rgba(0,0,0,.4)) drop-shadow(0 0 9px rgba(var(--mts-ghost-rgb),.55));
         transition: transform .1s cubic-bezier(.28,.11,.32,1), filter .1s cubic-bezier(.28,.11,.32,1); }
       .mts-ghost-cursor.pressed svg { transform: scale(.78);
-        filter: drop-shadow(0 1px 2px rgba(0,0,0,.4)) drop-shadow(0 0 5px rgba(52,199,89,.45)) brightness(.92); }
+        filter: drop-shadow(0 1px 2px rgba(0,0,0,.4)) drop-shadow(0 0 5px rgba(var(--mts-ghost-rgb),.45)) brightness(.92); }
       @keyframes mts-ghost-ripple { from { transform: scale(.35); opacity: .9; }
         to { transform: scale(2.3); opacity: 0; } }
       .mts-ghost-ripple { position: fixed; z-index: 2147483644; pointer-events: none;
         width: 40px; height: 40px; margin: -20px 0 0 -7px; border-radius: 50%;
-        background: radial-gradient(circle, rgba(52,199,89,.38) 0%, rgba(52,199,89,.14) 55%, rgba(52,199,89,0) 72%);
-        box-shadow: 0 0 14px rgba(52,199,89,.35);
+        background: radial-gradient(circle, rgba(var(--mts-ghost-rgb),.38) 0%, rgba(var(--mts-ghost-rgb),.14) 55%, rgba(var(--mts-ghost-rgb),0) 72%);
+        box-shadow: 0 0 14px rgba(var(--mts-ghost-rgb),.35);
         animation: mts-ghost-ripple .5s cubic-bezier(.28,.11,.32,1) forwards; }`;
     document.documentElement.appendChild(ghostStyleEl);
   }
@@ -174,15 +187,16 @@
     ensureGhostStyle();
     ghostEl = document.createElement('div');
     ghostEl.className = 'mts-ghost-cursor';
-    // Apple 风格指针：系统绿（#34c759 系）渐变填充 + 白描边 + 柔和绿光晕，
+    applyGhostColor(ghostEl);
+    // Apple 风格指针：渐变填充 + 白描边 + 同色光晕，
     // 与系统真实鼠标（黑箭头白边、无光晕）在深浅页面上都一眼可辨。
     // 渐变 id 加随机后缀，避免同页多框架注入时互相冲突。
     const gradId = 'mts-ghost-grad-' + Math.random().toString(36).slice(2, 8);
     ghostEl.innerHTML = `<svg width="26" height="26" viewBox="0 0 24 24">
       <defs>
         <linearGradient id="${gradId}" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0" stop-color="#3ecf6a"/>
-          <stop offset="1" stop-color="#2ea84f"/>
+          <stop offset="0" style="stop-color:var(--mts-ghost-light)"/>
+          <stop offset="1" style="stop-color:var(--mts-ghost-dark)"/>
         </linearGradient>
       </defs>
       <path d="M5.5 2.2 L5.5 20.5 c0 .5.55.72.87.38 l4.4-4.7 a.5.5 0 0 1 .38-.17 l4.9.15
@@ -203,6 +217,7 @@
     if (click) {
       const ripple = document.createElement('div');
       ripple.className = 'mts-ghost-ripple';
+      applyGhostColor(ripple);
       ripple.style.left = x + 'px';
       ripple.style.top = y + 'px';
       document.documentElement.appendChild(ripple);
@@ -266,9 +281,9 @@
   // 按下后位移超过阈值 → 进入拖选会话：先补发起点 mousedown，
   // 随后的按住移动在目标页逐点回放，实现跨窗口拖选复制。
   function onMouseMove(e) {
+    if (replaying || precisionToken !== null) return;
     if (!e.isTrusted) return;
     if (pickerActive) return;
-    if (performance.now() < suppressUntil) return;
     if (!leaderSelf && !dragAnchor) return;
     const vx = e.clientX / innerWidth;
     const vy = e.clientY / innerHeight;
@@ -320,11 +335,14 @@
 
   // label 被点击时浏览器会转发激活其关联控件，需一并检查
   function isExcluded(el) {
-    let k = el instanceof Element ? fieldKey(el) : null;
-    if (k && excluded.has(k)) return true;
-    if (el instanceof HTMLLabelElement && el.control) {
-      const ck = fieldKey(el.control);
-      if (ck && excluded.has(ck)) return true;
+    if (!(el instanceof Element)) return false;
+    const control = el.closest('button, [role="button"], label') || el;
+    const key = fieldKey(el);
+    const controlKey = control !== el && fieldKey(control);
+    if ((key && excluded.has(key)) || (controlKey && excluded.has(controlKey))) return true;
+    if (control instanceof HTMLLabelElement && control.control) {
+      const linkedKey = fieldKey(control.control);
+      if (linkedKey && excluded.has(linkedKey)) return true;
     }
     return false;
   }
@@ -339,21 +357,20 @@
   // input/change 视为注入前的旧输入，不广播。
   // ---------------------------------------------------------------------------
   let staleField = null;
-  try {
-    const ae = document.activeElement;
-    if (ae instanceof HTMLInputElement || ae instanceof HTMLTextAreaElement) {
-      if (ae.type !== 'checkbox' && ae.type !== 'radio' && ae.type !== 'file') {
-        staleField = { name: ae.name || '', id: ae.id || '', value: ae.value };
-      }
-    }
-  } catch { /* ignore */ }
+  let syncEnabled = false;
+  function snapshotFocusedField() {
+    const ae = deepActiveElement();
+    staleField = (ae instanceof HTMLInputElement || ae instanceof HTMLTextAreaElement) &&
+      !['checkbox', 'radio', 'file'].includes(ae.type) ? { el: ae, value: ae.value } : null;
+  }
 
   function isStaleFieldEvent(el, eventValue) {
     if (!staleField) return false;
-    const byName = staleField.name && el.name === staleField.name;
-    const byId = staleField.id && el.id === staleField.id;
-    if (!byName && !byId) return false;
-    if (eventValue !== undefined && eventValue !== staleField.value) return false;
+    if (staleField.el !== el) return false;
+    if (eventValue !== undefined && eventValue !== staleField.value) {
+      staleField = null;
+      return false;
+    }
     staleField = null; // 命中一次后清除，之后的输入正常广播
     return true;
   }
@@ -362,6 +379,7 @@
   // 发送
   // ---------------------------------------------------------------------------
   function send(event) {
+    if (!syncEnabled || replaying || precisionToken !== null) return;
     event.frame = FRAME_KEY;
     try {
       chrome.runtime.sendMessage({ type: 'mts:event', event }).catch(() => {});
@@ -414,6 +432,7 @@
   }
 
   function onScroll(e) {
+    if (replaying || precisionToken !== null) return;
     const t = e.target;
     const target = (t === document || t === document.documentElement || t === document.scrollingElement || t === document.body && document.scrollingElement === document.body) ? null : t;
     if (target !== null && target.nodeType !== Node.ELEMENT_NODE) return;
@@ -427,9 +446,9 @@
   let lastClick = { el: null, t: 0 };
 
   function onClick(e) {
+    if (replaying || precisionToken !== null) return;
     if (!e.isTrusted || e.button !== 0) return;
     if (pickerActive) return;
-    if (performance.now() < suppressUntil) return;
     // 拖选结束后的补发 click 不是点击语义，不再广播（拖选已由
     // dragstart/dragend 序列完整同步），避免目标页多出一次单击
     if (dragEndAt && performance.now() - dragEndAt < 350) { dragEndAt = 0; return; }
@@ -456,13 +475,14 @@
       ox: r.width ? (e.clientX - r.left) / r.width : 0.5,
       oy: r.height ? (e.clientY - r.top) / r.height : 0.5,
       detail: e.detail || 1,
+      targetTag: el.localName,
       mods: mods(e),
     });
   }
 
   function onFocusIn(e) {
+    if (replaying || precisionToken !== null) return;
     if (!e.isTrusted) return;
-    if (performance.now() < suppressUntil) return;
     const el = eventTarget(e);
     if (!(el instanceof Element)) return;
     if (isExcluded(el)) return;
@@ -481,13 +501,13 @@
   let dragAnchor = null;   // {vx, vy} 左键按下起点
   let dragging = false;    // 拖选会话进行中
   let dragEndAt = 0;       // 拖选结束时间（用于吞掉紧随的 click 广播）
-  let suppressUntil = 0;   // 精确模式抑制窗口：CDP 回放事件 isTrusted=true，
-                          // 会被当成真实输入再次广播（回环 + 劫持主控 +
-                          // isQuiet 误伤后续真实双击），窗口内不广播任何捕获事件
+  let replaying = false;
+  let precisionToken = null;
+  let precisionTimer = 0;
 
   function onPointerDown(e) {
+    if (replaying || precisionToken !== null) return;
     if (!e.isTrusted || pickerActive) return;
-    if (performance.now() < suppressUntil) return;
     if (e.button !== 0) return;
     dragAnchor = { vx: e.clientX / innerWidth, vy: e.clientY / innerHeight };
     dragging = false;
@@ -495,8 +515,8 @@
   }
 
   function onPointerUp(e) {
+    if (replaying || precisionToken !== null) return;
     if (!e.isTrusted || pickerActive) return;
-    if (performance.now() < suppressUntil) return;
     if (e.button !== 0) return;
     const vx = e.clientX / innerWidth;
     const vy = e.clientY / innerHeight;
@@ -510,8 +530,8 @@
   }
 
   function onContextMenu(e) {
+    if (replaying || precisionToken !== null) return;
     if (!e.isTrusted || pickerActive) return;
-    if (performance.now() < suppressUntil) return;
     send({ kind: 'contextmenu', vx: e.clientX / innerWidth, vy: e.clientY / innerHeight });
   }
 
@@ -519,8 +539,8 @@
   // 捕获：键盘 / 输入
   // ---------------------------------------------------------------------------
   function onKey(e) {
+    if (replaying || precisionToken !== null) return;
     if (!e.isTrusted || e.isComposing) return;
-    if (performance.now() < suppressUntil) return;
     const el = eventTarget(e);
     if (isSensitive(el)) return;
     if (el instanceof Element && isExcluded(el)) return;
@@ -534,12 +554,13 @@
       repeat: e.repeat,
       mods: mods(e),
       editable: isEditable(el),
+      sel: el instanceof Element && isEditable(el) ? selectorFor(el) : null,
     });
   }
 
   function onInput(e) {
+    if (replaying || precisionToken !== null) return;
     if (!e.isTrusted) return;
-    if (performance.now() < suppressUntil) return;
     const el = eventTarget(e);
     if (isSensitive(el)) return;
     if (isExcluded(el)) return;
@@ -569,8 +590,8 @@
   }
 
   function onChange(e) {
+    if (replaying || precisionToken !== null) return;
     if (!e.isTrusted) return;
-    if (performance.now() < suppressUntil) return;
     const el = eventTarget(e);
     if (isSensitive(el)) return;
     if (!(el instanceof HTMLInputElement || el instanceof HTMLSelectElement || el instanceof HTMLTextAreaElement)) return;
@@ -584,7 +605,13 @@
   // 回放
   // ---------------------------------------------------------------------------
   function resolveTarget(ev) {
-    return resolveSelector(ev.sel) || elementAtViewportRatio(ev.vx, ev.vy);
+    const matched = resolveSelector(ev.sel);
+    if (matched && (!ev.targetTag || matched.localName === ev.targetTag)) return matched;
+    // Canvas is hit-tested by position. For a DOM control, a missing selector
+    // must not turn into a click on an unrelated button in another window.
+    if (ev.sel && ev.targetTag !== 'canvas') return null;
+    const atPoint = elementAtViewportRatio(ev.vx, ev.vy);
+    return !ev.targetTag || atPoint?.localName === ev.targetTag ? atPoint : null;
   }
 
   function ensureVisible(el) {
@@ -606,7 +633,7 @@
 
   function replayScroll(ev) {
     const target = ev.sel ? resolveSelector(ev.sel) : null;
-    if (ev.sel && !target) return;
+    if (ev.sel && !target) return 'missing-target';
     const m = scrollMetrics(target);
     const x = ev.mode === 'relative' ? ev.rx * Math.max(0, m.maxX) : ev.x;
     const y = ev.mode === 'relative' ? ev.ry * Math.max(0, m.maxY) : ev.y;
@@ -621,7 +648,8 @@
     const el = resolveTarget(ev);
     // 点击时镜像鼠标同步闪烁（即便元素定位失败，仍显示点击位置反馈）
     if (ghostOn) showGhost(ev.vx, ev.vy, false, true);
-    if (!el) return;
+    if (!el) return 'missing-target';
+    if (isExcluded(el)) return 'isolated';
     const { x, y } = pointFor(el, ev);
     const m = ev.mods || {};
     const base = {
@@ -653,12 +681,15 @@
 
   function replayFocus(ev) {
     const el = resolveSelector(ev.sel);
-    if (el && typeof el.focus === 'function' && deepActiveElement() !== el) el.focus({ preventScroll: true });
+    if (!el) return 'missing-target';
+    if (isExcluded(el)) return 'isolated';
+    if (typeof el.focus === 'function' && deepActiveElement() !== el) el.focus({ preventScroll: true });
   }
 
   function replayKey(ev) {
     const target = deepActiveElement() || document.body;
-    if (!target || isSensitive(target)) return;
+    if (!target || (ev.sel && resolveSelector(ev.sel) !== target)) return 'missing-target';
+    if (isSensitive(target) || isExcluded(target)) return 'isolated';
     const m = ev.mods || {};
     const kev = new KeyboardEvent(ev.type, {
       key: ev.key, code: ev.code, keyCode: ev.keyCode, which: ev.keyCode,
@@ -670,6 +701,8 @@
     // 补齐默认动作"在表单字段按 Enter -> 提交"
     if (notCancelled && ev.type === 'keydown' && ev.key === 'Enter' && !m.ctrl && !m.alt && !m.meta &&
         target instanceof HTMLInputElement && target.form) {
+      const submitters = [...target.form.elements].filter((el) => el.type === 'submit' || el.type === 'image');
+      if (submitters.some(isExcluded)) return 'isolated';
       target.form.requestSubmit();
     }
   }
@@ -687,24 +720,32 @@
     // 应用模型照常更新；目标页还没打开编辑器时，在相同位置回放双击让应用
     // 打开编辑器后重试插入（自绘表格的编辑器是惰性创建的）。
     if (ev.ins) {
-      let host = resolveSelector(ev.sel);
-      if (!host && ev.vx != null) host = findEditableAt(ev.vx, ev.vy);
-      if (host) { insertTextInto(host, ev.ins); return; }
+      const findHost = () => resolveSelector(ev.sel) || (ev.vx != null && findEditableAt(ev.vx, ev.vy));
+      const insert = (host) => {
+        if (isSensitive(host) || isExcluded(host)) return 'isolated';
+        return insertTextInto(host, ev.ins) ? 'applied' : 'missing-target';
+      };
+      const host = findHost();
+      if (host) return insert(host);
       if (ev.vx != null) {
+        const atPoint = elementAtViewportRatio(ev.vx, ev.vy);
+        if (atPoint && isExcluded(atPoint)) return 'isolated';
         synthClickAt(ev.vx, ev.vy, 2);
-        let done = false;
-        const tryInsert = () => {
-          if (done) return;
-          const h = findEditableAt(ev.vx, ev.vy);
-          if (h) { done = true; insertTextInto(h, ev.ins); }
-        };
-        setTimeout(tryInsert, 120);
-        setTimeout(tryInsert, 350);
-        return;
+        // 回执要等编辑器真正就绪，后续 Enter 才能按顺序回放。
+        return (async () => {
+          for (const delay of [0, 50, 100]) {
+            await new Promise((resolve) => setTimeout(resolve, delay));
+            if (signal.aborted || Date.now() > ev.deadline) return 'expired';
+            const editor = findHost();
+            if (editor) return withoutCapture(() => insert(editor));
+          }
+          return 'missing-target';
+        })();
       }
     }
     const el = resolveSelector(ev.sel);
-    if (!el || isSensitive(el)) return;
+    if (!el) return 'missing-target';
+    if (isSensitive(el) || isExcluded(el)) return 'isolated';
     if (ev.html != null) {
       if (el.innerHTML === ev.html) return;
       el.innerHTML = ev.html;
@@ -770,7 +811,8 @@
 
   function replayChange(ev) {
     const el = resolveSelector(ev.sel);
-    if (!el || isSensitive(el)) return;
+    if (!el) return 'missing-target';
+    if (isSensitive(el) || isExcluded(el)) return 'isolated';
     if (el instanceof HTMLInputElement && (el.type === 'checkbox' || el.type === 'radio')) {
       // 点击会像原始操作一样触发 input+change；点击回放已恢复状态时跳过
       if (el.checked !== ev.checked) el.click();
@@ -860,7 +902,7 @@
   // 精确模式用：计算目标元素在顶层视口中的坐标
   function locate(ev) {
     const el = resolveTarget(ev);
-    if (!el) return null;
+    if (!el || isExcluded(el)) return null;
     const p = pointFor(el, ev);
     return { x: p.x, y: p.y, visible: document.visibilityState === 'visible' };
   }
@@ -1001,45 +1043,89 @@
   // ---------------------------------------------------------------------------
   // 来自 Service Worker 的消息
   // ---------------------------------------------------------------------------
+  function withoutCapture(run) {
+    replaying = true;
+    try { return run(); } finally { replaying = false; }
+  }
+
   function onMessage(msg, _sender, sendResponse) {
     switch (msg?.type) {
-      case 'mts:replay':
-        if (msg.event.frame === FRAME_KEY) {
-          try { REPLAY[msg.event.kind]?.(msg.event); } catch (err) { console.debug('[跨标签页操作同步助手] 回放失败', err); }
+      case 'mts:replay': {
+        if (msg.event.frame !== FRAME_KEY) {
+          sendResponse('missing-frame');
+          return;
         }
+        if (Date.now() > msg.event.deadline) {
+          sendResponse('expired');
+          return;
+        }
+        try {
+          const result = withoutCapture(() => REPLAY[msg.event.kind](msg.event));
+          if (result instanceof Promise) {
+            result.then((status) => sendResponse(status), () => sendResponse('failed'));
+            return true;
+          }
+          sendResponse(result || 'applied');
+        } catch { sendResponse('failed'); }
         return;
+      }
       case 'mts:locate':
-        if (FRAME_KEY === 'top') sendResponse(locate(msg.event));
+        if (FRAME_KEY === 'top') sendResponse(withoutCapture(() => locate(msg.event)));
         return;
+      case 'mts:precision-target': {
+        const target = deepActiveElement();
+        const ev = msg.event;
+        sendResponse(document.visibilityState === 'visible' && !!target &&
+          !isSensitive(target) && !isExcluded(target) &&
+          (ev.kind !== 'input' || target.isContentEditable || target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) &&
+          (!ev.sel || resolveSelector(ev.sel) === target) &&
+          !(ev.kind === 'key' && ev.key === 'Enter' && target.form &&
+            [...target.form.elements].some((el) => ['submit', 'image'].includes(el.type) && isExcluded(el))));
+        return;
+      }
       case 'mts:ping':
         if (FRAME_KEY === 'top') sendResponse(true);
         return;
       case 'mts:toast':
-        // 仅顶层框架显示，避免同页多框架叠出多层提示条
         if (FRAME_KEY === 'top') {
           showToast(msg.on, msg.count || 0);
           sendResponse(true);
         }
         return;
       case 'mts:leader':
-        // Service Worker 下发主控身份（点击/滚动/键盘接管时触发）
         leaderSelf = !!msg.on;
         if (FRAME_KEY === 'top') setLeaderRing(leaderSelf);
         return;
-      case 'mts:quiet':
-        // 精确模式回放前的抑制窗口：CDP 输入 isTrusted=true，避免被再次广播
-        suppressUntil = performance.now() + (msg.ms || 400);
+      case 'mts:quiet': {
+        clearTimeout(precisionTimer);
+        precisionToken = msg.token;
+        precisionTimer = setTimeout(() => { precisionToken = null; }, msg.ms);
+        if (FRAME_KEY === 'top') sendResponse(true);
+        return;
+      }
+      case 'mts:unquiet':
+        if (precisionToken === msg.token) {
+          clearTimeout(precisionTimer);
+          precisionToken = null;
+        }
         if (FRAME_KEY === 'top') sendResponse(true);
         return;
       case 'mts:teardown':
         teardown();
         return;
       case 'mts:config': {
+        if (msg.enabled && !syncEnabled) snapshotFocusedField();
+        syncEnabled = !!msg.enabled;
         excluded.clear();
         fieldLabels = {};
         for (const f of msg.excluded || []) {
           excluded.add(f.key);
           fieldLabels[f.key] = f.label || f.key;
+        }
+        const nextColor = cursorColors.normalize(msg.ghostColor);
+        if (nextColor !== ghostColor) {
+          ghostColor = nextColor;
+          if (ghostEl) applyGhostColor(ghostEl);
         }
         const wantGhost = !!msg.ghost;
         if (wantGhost !== ghostOn) {
@@ -1069,6 +1155,7 @@
     removeGhost();
     removeLeaderRing();
     ac.abort();
+    clearTimeout(precisionTimer);
     if (scrollRaf) cancelAnimationFrame(scrollRaf);
     try { chrome.runtime.onMessage.removeListener(onMessage); } catch { /* 上下文已失效 */ }
     delete window.__archiveSyncHelper;
@@ -1088,5 +1175,5 @@
   document.addEventListener('change', onChange, capture);
   chrome.runtime.onMessage.addListener(onMessage);
 
-  window.__archiveSyncHelper = true;
+  return (window.__archiveSyncHelper = FRAME_KEY);
 })();
